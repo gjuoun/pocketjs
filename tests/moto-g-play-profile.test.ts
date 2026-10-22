@@ -21,3 +21,19 @@ test("the Android CLI rejects removed or unknown profiles before invoking tools"
     expect(result.stdout.toString()).toBe("");
   }
 });
+
+test("the Android CLI refuses --guest outside build-app", () => {
+  const result = Bun.spawnSync([
+    process.execPath, "tools/android.ts", "--profile=moto-g-play", "doctor", "--guest=guest-dir",
+  ], { stdout: "pipe", stderr: "pipe" });
+  expect(result.exitCode).not.toBe(0);
+  expect(result.stderr.toString()).toContain("--guest goes with build-app");
+});
+
+test("the Android CLI refuses --guest without a plan for the identity and viewport", () => {
+  const result = Bun.spawnSync([
+    process.execPath, "tools/android.ts", "--profile=moto-g-play", "build-app", "--guest=guest-dir",
+  ], { stdout: "pipe", stderr: "pipe" });
+  expect(result.exitCode).not.toBe(0);
+  expect(result.stderr.toString()).toContain("--guest needs --plan");
+});

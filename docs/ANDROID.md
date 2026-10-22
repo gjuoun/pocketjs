@@ -61,13 +61,18 @@ followed by `build-app` (the libraries, the Activity and the package).
 
 ```sh
 bun tools/android.ts --profile=redmi-1s build-app \
-  --plan=<plan.json> --project-root=<dir> --out=<file.apk> [--icon=<png|svg>] [--release]
+  --plan=<plan.json> --project-root=<dir> --guest=<dir> --out=<file.apk> [--icon=<png|svg>] [--release]
 ```
 
 - `--plan` is a plan resolved for the profile's target, for example by
   `validateAndResolveBuildPlan(manifest, { target: REDMI_1S_TARGET }, REDMI_1S_CONTRACTS)`.
   The tool verifies its checksum and its target, then compiles the guest with
   `tools/build.ts` from `--project-root` (default: this repository).
+- **`--guest=<dir>` takes a guest another toolchain built.** `<dir>/<app output>.js`
+  and `<dir>/<app output>.pak` become `assets/app.js` and `assets/app.pak`, and the
+  plan's entry is not compiled; the plan still supplies the identity and the
+  viewport. `tools/build.ts` compiles `solid`, `vue-vapor` and `octane` entries
+  only, so an app on another renderer builds its own bundle and hands it here.
 - **The package name, label and version come from the plan**: the app id with
   each `-` as `_`, the title, and `major * 1_000_000 + minor * 1_000 + patch`
   as the version code.

@@ -34,6 +34,7 @@ import {
 import { MOTO_G_PLAY_CONTRACTS, MOTO_G_PLAY_TARGET, resolveMotoGPlayBuildPlan } from "./moto-g-play-profile.ts";
 import { REDMI_1S_CONTRACTS, REDMI_1S_TARGET, resolveRedmi1sBuildPlan } from "./redmi-1s-profile.ts";
 import { ANDROID_DEFAULT_ICON, bakeAndroidLauncherIcons } from "./android-icon.ts";
+import { extractHostBuildInputs } from "../framework/src/manifest/host-build-inputs.ts";
 import type { ResolvedBuildPlan } from "../framework/src/manifest/plan.ts";
 
 /** The target values the native library is compiled with: the same for every app of a profile. */
@@ -95,6 +96,8 @@ const repository = fileURLToPath(new URL("..", import.meta.url));
 const command = argv.find(a => !a.startsWith("--")) ?? "doctor";
 /** A resolved plan for the profile's target, in place of the toolchain file's manifest. */
 const planOption = option("plan");
+/** A directory holding `<app output>.js` and `.pak` built by another toolchain; `--plan` still names the identity. */
+const guestOption = option("guest");
 const projectRoot = resolve(option("project-root") ?? repository);
 const outOption = option("out");
 /** Signed with the Pocket Nexus Android release key and not debuggable. */
@@ -689,11 +692,26 @@ function elfSummary(library: string): string {
 }
 
 /**
- * The guest of this build: the plan `--plan` names, compiled from
- * `--project-root`, or the bundle `build-demo` left for the toolchain file's
- * manifest.
+ * The guest of this build: the bundle `--guest` names, the plan `--plan`
+ * names compiled from `--project-root`, or the bundle `build-demo` left for
+ * the toolchain file's manifest. A `--guest` directory is for an app another
+ * toolchain built: the plan still supplies the identity and the viewport, and
+ * nothing is compiled here.
  */
 function guestBundle(): GuestBundle {
+  if (guestOption) {
+    const planPath = planOption;
+    if (!planPath) throw new Error(`${LABEL}: --guest needs --plan for the app identity and viewport`);
+    const plan = JSON.parse(readFileSync(resolve(planPath), "utf8")) as ResolvedBuildPlan;
+    const inputs = extractHostBuildInputs(plan, { expectedTarget: target });
+    const directory = resolve(guestOption);
+    const javaScript = join(directory, `${inputs.appOutput}.js`);
+    const pack = join(directory, `${inputs.appOutput}.pak`);
+    for (const path of [javaScript, pack]) {
+      if (!existsSync(path)) throw new Error(`${LABEL}: --guest has no ${path}`);
+    }
+    return { plan, inputs, javaScript, pack };
+  }
   if (!planOption) return readGuestBundle(guest);
   return buildGuestBundleFromPlan({
     label: LABEL,
@@ -839,11 +857,18 @@ async function buildRuntime(): Promise<void> {
 
 const USAGE =
   `usage: bun tools/android.ts [--profile=${Object.keys(PROFILES).join("|")}] <doctor|setup|build-demo|build-app|build|runtime>\n` +
-  `       build-app [--plan=<plan.json> [--project-root=<dir>]] [--out=<file.apk>] [--icon=<png|svg>] [--release]\n` +
+  `       build-app [--plan=<plan.json> [--project-root=<dir>] [--guest=<dir>]] [--out=<file.apk>] [--icon=<png|svg>] [--release]\n` +
+  `       --guest takes <dir>/<app output>.js and .pak instead of compiling the plan's entry\n` +
   `       runtime --out=<directory>`;
 
 if (planOption && command !== "build-app" && command !== "build") {
   throw new Error(`${LABEL}: --plan goes with build-app\n${USAGE}`);
+}
+if (guestOption && command !== "build-app" && command !== "build") {
+  throw new Error(`${LABEL}: --guest goes with build-app\n${USAGE}`);
+}
+if (guestOption && !planOption) {
+  throw new Error(`${LABEL}: --guest needs --plan for the app identity and viewport`);
 }
 if (iconOption && !/\.(png|svg)$/i.test(iconOption)) {
   throw new Error(`${LABEL}: --icon names a .png or an .svg file`);
