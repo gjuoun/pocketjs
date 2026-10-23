@@ -1,0 +1,15 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-idf-host-1.json",
+  "version": 1,
+  "id": "tab5-clear",
+  "platform": "esp-idf",
+  "form": "takeover",
+  "tickHz": 60,
+  "display": {
+    "physicalViewport": [720, 1280],
+    "logicalViewports": [[360, 640]],
+    "presentations": ["native"],
+    "rasterDensity": 2
+  },
+  "capabilities": ["input.touch", "text.glyphs.baked"]
+}

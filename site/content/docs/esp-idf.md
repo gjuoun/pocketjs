@@ -63,8 +63,8 @@ input contract implemented by that product:
 variant table. Capabilities describe framework APIs that the firmware
 delivers. A GPIO, touch controller, or analog device does not belong in this
 file unless the native host converts it into the corresponding PocketJS input
-contract. **A profile that advertises `input.touch` is limited to 512×512
-logical viewports because each frame carries 9-bit logical coordinates.**
+contract. **A profile that advertises `input.touch` is limited to 1024×1024
+logical viewports because each frame carries 10-bit logical coordinates.**
 
 The build hashes the canonical profile. Device admission rejects a package
 whose target, HostOps ABI, tick rate, viewport, density, presentation, or
@@ -272,8 +272,9 @@ ESP_ERROR_CHECK(pocketjs_ui_turn(binding, &input, &frame));
 ```
 
 The binding converts signed analog axes to the framework range and packs up to
-eight logical touch contacts. Touch coordinates must fit the current 9-bit
-per-axis frame contract. Hardware SDK types stop in the product input adapter.
+eight logical touch contacts. A contact with a coordinate above 511 uses the
+wide 10-bit word; coordinates above 1023 are rejected. Hardware SDK types stop
+in the product input adapter.
 
 ## RGB565 renderer
 

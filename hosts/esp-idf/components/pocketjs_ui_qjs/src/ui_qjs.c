@@ -832,12 +832,16 @@ esp_err_t pocketjs_ui_turn(pocketjs_ui_qjs_t *binding,
   uint32_t touches[POCKETJS_UI_MAX_TOUCHES] = {0};
   int32_t hits[POCKETJS_UI_MAX_TOUCHES] = {0};
   for (size_t index = 0; index < input->touch_count; ++index) {
-    if (input->touches[index].x > 511U || input->touches[index].y > 511U) {
+    const uint32_t id = input->touches[index].id;
+    const uint32_t x = input->touches[index].x;
+    const uint32_t y = input->touches[index].y;
+    if (x > 1023U || y > 1023U) {
       return ESP_ERR_INVALID_ARG;
     }
-    touches[index] = ((uint32_t)input->touches[index].id << 18U) |
-                     ((uint32_t)input->touches[index].y << 9U) |
-                     input->touches[index].x;
+    /* Coordinates past 511 use the wide form: bit31, x:10, y:10, id:8. */
+    touches[index] = x > 511U || y > 511U
+                         ? 0x80000000U | (id << 20U) | (y << 10U) | x
+                         : (id << 18U) | (y << 9U) | x;
   }
   const size_t hit_count =
       pocketjs_ui_core_touch_hits(binding->core, touches, input->touch_count,

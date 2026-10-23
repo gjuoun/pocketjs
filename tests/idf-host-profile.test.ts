@@ -89,7 +89,7 @@ describe("ESP-IDF host profile", () => {
   test("rejects touch viewports that exceed the packed coordinate range", () => {
     const result = validatePocketIdfHostProfile({
       ...profile,
-      display: { ...profile.display, logicalViewports: [[513, 272]] },
+      display: { ...profile.display, logicalViewports: [[1025, 272]] },
       capabilities: [...profile.capabilities, "input.touch"],
     });
     expect(result.ok).toBe(false);
@@ -97,7 +97,7 @@ describe("ESP-IDF host profile", () => {
     expect(result.diagnostics).toContainEqual({
       code: "idfHost.touchViewportTooLarge",
       path: "/display/logicalViewports/0",
-      message: "touch-capable logical viewports must fit the 9-bit coordinate contract",
+      message: "touch-capable logical viewports must fit the 10-bit coordinate contract",
     });
   });
 });

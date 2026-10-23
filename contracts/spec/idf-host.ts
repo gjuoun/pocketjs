@@ -70,7 +70,7 @@ export const pocketIdfHostSchema = {
         physicalViewport: viewportSchema,
         logicalViewports: {
           type: "array",
-          description: "Touch-capable profiles are additionally limited to 512x512 logical coordinates.",
+          description: "Touch-capable profiles are additionally limited to 1024x1024 logical coordinates.",
           items: viewportSchema,
           minItems: 1,
           uniqueItems: true,

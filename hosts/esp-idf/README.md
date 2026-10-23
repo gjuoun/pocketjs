@@ -46,6 +46,19 @@ Rust environment already supplied by the developer.
 `examples/runner` executes the same application through the optional task
 runner. Neither example initializes a panel or reads a device input driver.
 
+`examples/m5stack-tab5` is complete firmware for the M5Stack Tab5. It drives
+the MIPI-DSI panel and touch controller through the
+`espressif/m5stack_tab5_noglib` BSP, renders RGB565 strips, and presents them
+through the PPA. A landscape app is turned 90 degrees onto the portrait panel.
+**The firmware embeds `apps/hero` at 640×360 @2x by default;
+`-DPOCKETJS_TAB5_APP=clear` embeds `apps/clear` at 360×640 @2x.** Both fill
+the 720×1280 panel; each app's `pocket.tab5.json` declares that viewport.
+
+```sh
+cd hosts/esp-idf/examples/m5stack-tab5
+idf.py -DPOCKETJS_TAB5_APP=clear build flash
+```
+
 ## Hardware tests
 
 `tests/data-smoke` is an independent ESP32-P4 conformance binary for the DB/FS
