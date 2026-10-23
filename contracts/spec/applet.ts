@@ -113,6 +113,7 @@ export const APPLET_MODULES = [
   "classic",
   "touch",
   "virtual-list",
+  "slot-list",
   "physics",
   "media",
   "audio",

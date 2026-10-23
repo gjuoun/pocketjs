@@ -21,6 +21,7 @@ Framework-internal and tests/debug helpers are not exhaustive here. For conceptu
 | `@pocketjs/framework/kinetics` | `createScroller`, `bindDpadScroll`, `Scroller` / `ScrollerOptions` / `ScrollerState` types (Solid and Vue Vapor) |
 | `@pocketjs/framework/osk` | `Osk`, `TextField`, `createOsk`, `OSK_H`, `OSK_LAYERS`, `OSK_LAYOUTS`, `oskPanelHeight`, `resetPanelMemory` (Solid) |
 | `@pocketjs/framework/virtual-list` | `VirtualList`, `VirtualListProps`, `VirtualListHandle` (Solid) |
+| `@pocketjs/framework/slot-list` | `createSlotPool`, `createMeasuredList`, `createFrameBudget`, `frameBudget`, `FRAME_BUDGET_MS` and their types (Solid) |
 | `@pocketjs/framework/display` | `auxiliaryViewport`, `hasAuxiliarySurface` |
 | `@pocketjs/framework/platform` | `platform`, `hasFeature` |
 | `@pocketjs/framework/modality` | `modality`, `presentation`, `screen`, `surfaceHasTouch`, `supports`, `glyph` |
@@ -1037,6 +1038,92 @@ Registers an `onFrame` hook that turns held UP/DOWN and the analog stick into
 | `stepPx` | `number` | `6` | Px per held frame of UP/DOWN. |
 | `nubPx` | `number` | `10` | Px per frame at full analog deflection. |
 | `active` | `() => boolean` | always on | Gate the hook, for example `() => !osk.isOpen()`. Raw button reads are not muted by a touch or button block. |
+
+---
+
+## `@pocketjs/framework/slot-list`
+
+Long lists with rows of measured height: a fixed pool of row slots, rows
+measured when they come near the view, and **one per-frame work budget**
+for measuring and painting. A row whose content is not ready shows its
+skeleton for a frame or more while the list keeps the frame rate.
+
+```tsx
+import { createMeasuredList, createSlotPool } from "@pocketjs/framework/slot-list";
+
+const list = createMeasuredList({
+  items: posts,                       // Accessor<readonly Post[]>
+  measure: (post) => shapePost(post), // { h, ...what the slot draws }
+  estimate: (post) => 60 + post.text.length / 3,
+  version: (post) => fontFor(post),   // measure again when this changes
+  offset: scroller.offset,
+  view: 204,
+  overscan: 80,
+  rebase: (delta) => scroller.rebase(delta),
+});
+const pool = createSlotPool(list.rows, scroller.offset, { view: 204, overscan: 80, minRowH: 40 });
+pool.attach(slot, (row, skeleton, moved) => {
+  moveSlot(row);                      // y and h
+  if (moved) return;                  // the slot shows this content already
+  if (skeleton) return showSkeleton();
+  paintRow(row);
+});
+```
+
+### Budget
+
+`frameBudget()` is the budget every list shares unless one is passed as
+`budget`: **`FRAME_BUDGET_MS` (4 ms) of list work per frame**, reset when
+the virtual frame advances. The first piece of work in a frame always runs,
+so a row that costs more than the budget still gets measured. Work is taken
+in this order:
+
+1. rows in view with no measurement, then the overscan;
+2. rows ahead of the motion, while the list moves;
+3. the rest of the list and rows whose `version` changed, in frames where
+   the offset has held still for 6 frames and no list left rows in its view
+   undone in the previous frame.
+
+A stale row (its version changed) keeps its old measurement until it is
+measured again in step 3: a list in motion shows the old row, not a
+skeleton. A list hidden under another page keeps measuring in step 3 only,
+so the page on top goes first.
+
+### `createMeasuredList`
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `items` | `() => readonly T[]` | The items in order. A new array is a new list; measurements are kept by `key`. |
+| `measure` | `(item, index) => V` | The row's layout, at least `{ h }`. It must be bounded work. |
+| `estimate` | `(item, index) => number` | The height used until the row is measured. |
+| `version` | `(item, index) => unknown` | Measured again when this changes (compared with `===`). |
+| `key` | `(item, index) => unknown` | What a measurement is kept by. Default: the item. |
+| `offset`, `view`, `overscan` | | The scroll offset accessor and the visible and kept-filled heights in px. |
+| `top` | `() => number` | Content px above the first row. |
+| `rebase` | `(delta: number) => void` | Called when rows above the reader change height or are added, so the row at the offset stays where it is on screen. Pass `Scroller.rebase` and move the content with it. |
+| `budget` | `FrameBudget` | Default `frameBudget()`. |
+
+It returns `rows` (`MeasuredRow[]`: `item`, `index`, `y`, `h`, `value` or
+`null`, `pending`, `content`), `height` (estimates included), `complete`,
+`recheck()` to scan the whole list for changed versions (the scan stops once
+a full pass finds nothing) and `invalidate()` to drop every measurement. A
+row keeps its object while its place and measurement stay.
+
+### `createSlotPool`
+
+`createSlotPool(rows, offset, { view, overscan, minRowH, budget })` mounts
+`ceil((view + 2 × overscan) / minRowH) + 1` slots. Slot k shows the band row
+whose index is k modulo the pool size, so a row entering the band repaints
+one slot. A slot's painter is called with `(row, skeleton, moved)`:
+
+- `skeleton` — move to the row and show a placeholder: the row is pending,
+  or the frame's budget is spent. The full paint comes in a later frame,
+  rows in view first.
+- `moved` — the row's `content` is the one the slot last painted in full:
+  only its place changed. It costs nothing against the budget.
+
+A pending row has `pending: true`. Rows without `content` are painted in
+full whenever their object changes.
 
 ---
 

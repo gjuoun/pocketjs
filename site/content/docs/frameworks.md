@@ -153,8 +153,8 @@ is the registry, and it declares:
   recognizer and scroller machinery lives in framework-neutral core modules;
   each of the two frameworks gets a thin shim that binds disposal to its own
   lifecycle.
-- **`osk` and `virtual-list` resolve under Solid only.** Nothing else is
-  meant to reach their Solid-flavored implementations.
+- **`osk`, `virtual-list` and `slot-list` resolve under Solid only.**
+  Nothing else is meant to reach their Solid-flavored implementations.
 - **What a framework does not resolve is not walked in pass 1**, so class
   strings from another framework's module never enter this build's
   `styles.bin`. The bare specifier still carries an npm export pointing at

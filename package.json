@@ -224,6 +224,7 @@
     "./prelude": "./framework/src/prelude.ts",
     "./renderer": "./framework/src/renderer.ts",
     "./virtual-list": "./framework/src/virtual-list.ts",
+    "./slot-list": "./framework/src/slot-list.ts",
     "./vue-vapor/std": {"types":"./framework/src/std-microts.d.ts","default":"./framework/src/std-microts.ts"},
     "./solid/std": {"types":"./framework/src/std-microts.d.ts","default":"./framework/src/std-microts.ts"},
     "./solid/reactive": "./framework/src/reactive-solid.ts",

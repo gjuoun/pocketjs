@@ -161,6 +161,7 @@ export const SUBPATHS: Record<string, SubpathDecl> = {
     aliases: ALL,
   },
   "virtual-list": { file: { solid: "framework/src/virtual-list.ts" } },
+  "slot-list": { file: { solid: "framework/src/slot-list.ts" } },
   "vue-vapor/std": {
     file: { "vue-vapor": "framework/src/std-microts.ts" },
     npmFile: "framework/src/std-microts.ts",
