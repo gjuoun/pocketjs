@@ -152,8 +152,8 @@ and scratch-corpus instructions are in `hosts/esp-idf/tests/fuzz`.
 
 Before a component release:
 
-1. Flash `examples/smoke` to the Waveshare ESP32-P4 test board. Require the
-   fixed framebuffer hash and non-zero FILL, BLEND, and SRM counters.
+1. Flash `examples/smoke` to the M5Stack Tab5. Require the fixed framebuffer
+   hash and non-zero FILL, BLEND, and SRM counters.
 2. Flash the S3 build to AtomS3R. Require the same software-reference pixel
    hash and no PPA symbols in the map.
 3. Run 10,000 caller-driven turns on both boards and compare heap before and

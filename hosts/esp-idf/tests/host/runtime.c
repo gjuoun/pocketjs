@@ -112,6 +112,21 @@ static void test_binding(const unsigned char *pak, size_t pak_size) {
   assert(pocketjs_rgb565_prepare(renderer, target, &b, &damage) == ESP_OK);
   assert(pocketjs_ui_core_draw(core, &a) == ESP_OK);
   assert(pocketjs_rgb565_commit(renderer, target, &b) == ESP_ERR_INVALID_STATE);
+  static const char touch_frame[] =
+      "globalThis.frame=(buttons,analog,touches)=>{globalThis.touch=touches[0]}";
+  assert(pocketjs_guest_eval(guest, touch_frame, sizeof(touch_frame) - 1U,
+                             "touch") == ESP_OK);
+  pocketjs_ui_touch_t touch = {.id = 5, .x = 20, .y = 30};
+  pocketjs_ui_input_t input = {
+      .struct_size = sizeof(input), .touches = &touch, .touch_count = 1};
+  assert(pocketjs_ui_turn(binding, &input, &a) == ESP_OK);
+  eval(ctx, "if(touch!==5*2**18+30*2**9+20) throw Error('legacy touch')");
+  touch = (pocketjs_ui_touch_t){.id = 5, .x = 600, .y = 1023};
+  assert(pocketjs_ui_turn(binding, &input, &a) == ESP_OK);
+  eval(ctx,
+       "if(touch!==2**31+5*2**20+1023*2**10+600) throw Error('wide touch')");
+  touch.x = 1024;
+  assert(pocketjs_ui_turn(binding, &input, &a) == ESP_ERR_INVALID_ARG);
   pocketjs_rgb565_target_destroy(target);
   pocketjs_rgb565_renderer_destroy(renderer);
   pocketjs_guest_destroy(guest);

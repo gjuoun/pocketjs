@@ -60,11 +60,11 @@ export function validatePocketIdfHostProfile(input: unknown): ValidationResult<P
     }
     if (profile.capabilities.includes("input.touch")) {
       profile.display.logicalViewports.forEach((viewport, index) => {
-        if (viewport[0] > 512 || viewport[1] > 512) {
+        if (viewport[0] > 1024 || viewport[1] > 1024) {
           diagnostics.push({
             code: "idfHost.touchViewportTooLarge",
             path: `/display/logicalViewports/${index}`,
-            message: "touch-capable logical viewports must fit the 9-bit coordinate contract",
+            message: "touch-capable logical viewports must fit the 10-bit coordinate contract",
           });
         }
       });

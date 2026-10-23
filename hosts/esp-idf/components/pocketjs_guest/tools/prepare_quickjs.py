@@ -10,7 +10,7 @@ import re
 import sys
 from pathlib import Path
 
-SOURCE_SHA256 = "8779a5050c2a78905b9f5fa671f8e33920d4ec9d82cc99157cf12bd5339e4a48"
+SOURCE_SHA256 = "36128da188cb236ffd029dd3c672ff8f85e5a196a9211e267a515c8efc1ab52c"
 
 
 def prepare(source: bytes) -> str:
