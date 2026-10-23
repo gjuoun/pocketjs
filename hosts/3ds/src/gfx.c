@@ -289,7 +289,6 @@ static void fetch_texel(
 static bool upload_tiled(
   C3D_Tex *texture,
   const PocketTexture *source,
-  const uint8_t *coverage,
   uint32_t width,
   uint32_t height,
   uint32_t texture_width,
@@ -315,13 +314,7 @@ static bool upload_tiled(
           uint32_t column = tx + x;
           if (column >= width) continue;
           uint8_t rgba[4];
-          if (source != NULL) {
-            fetch_texel(source, column, row, rgba);
-          } else {
-            /* Font coverage: white ink, alpha from the glyph grid. */
-            rgba[0] = rgba[1] = rgba[2] = 255;
-            rgba[3] = coverage[(size_t)row * width + column];
-          }
+          fetch_texel(source, column, row, rgba);
           uint8_t *destination = tiled + ((size_t)tile * 64 + morton_offset(x, y)) * 4;
           destination[0] = rgba[3];
           destination[1] = rgba[2];
@@ -346,6 +339,51 @@ static bool upload_tiled(
   return true;
 }
 
+/*
+ * A font's coverage grid as an LA8 texture, written straight into the
+ * texture's linear memory. Every texel is white ink (L = 255) with the
+ * glyph's coverage as alpha, so sampling gives what the RGBA8 path gives at
+ * half the bytes. A 512x1024 runtime glyph atlas took about 60 ms through
+ * upload_tiled's per-texel fetch on an Old 3DS.
+ */
+static bool upload_coverage(C3D_Tex *texture, const uint8_t *grid, uint32_t width, uint32_t height) {
+  static uint8_t morton[64];
+  static bool morton_ready;
+  if (!morton_ready) {
+    for (uint32_t y = 0; y < 8; y += 1) {
+      for (uint32_t x = 0; x < 8; x += 1) morton[y * 8 + x] = (uint8_t)morton_offset(x, y);
+    }
+    morton_ready = true;
+  }
+  size_t bytes = (size_t)width * height * 2;
+  if (!pocket_pica_texture_init(texture, width, height, 1, GPU_LA8, bytes)) return false;
+  uint8_t *tiled = texture->data;
+  uint32_t tiles_across = width / 8;
+  for (uint32_t ty = 0; ty < height; ty += 8) {
+    uint8_t *band = tiled + (size_t)(ty / 8) * tiles_across * 128;
+    for (uint32_t y = 0; y < 8; y += 1) {
+      /* Tiled row 0 is sampled at v = 1: grid row 0 is the last tiled row. */
+      const uint8_t *source = grid + (size_t)(height - 1 - (ty + y)) * width;
+      const uint8_t *offsets = morton + y * 8;
+      for (uint32_t tx = 0; tx < width; tx += 8) {
+        uint8_t *tile = band + (size_t)(tx / 8) * 128;
+        for (uint32_t x = 0; x < 8; x += 1) {
+          uint8_t *texel = tile + offsets[x] * 2u;
+          texel[0] = source[tx + x];
+          texel[1] = 0xff;
+        }
+      }
+    }
+  }
+  if (!pocket_pica_texture_publish(texture, bytes)) {
+    pocket_pica_texture_destroy(texture);
+    return false;
+  }
+  C3D_TexSetFilter(texture, GPU_LINEAR, GPU_LINEAR);
+  C3D_TexSetWrap(texture, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // resource sync
 // ---------------------------------------------------------------------------
@@ -358,7 +396,6 @@ static bool upload_image(ImageTexture *entry, const PocketTexture *source) {
   if (!upload_tiled(
         &entry->texture,
         source,
-        NULL,
         source->width,
         source->height,
         texture_width,
@@ -425,16 +462,7 @@ static bool upload_font(FontTexture *entry, const PocketFontAtlas *atlas) {
       );
     }
   }
-  bool ok = upload_tiled(
-    &entry->texture,
-    NULL,
-    grid,
-    texture_width,
-    texture_height,
-    texture_width,
-    texture_height,
-    true
-  );
+  bool ok = upload_coverage(&entry->texture, grid, texture_width, texture_height);
   free(grid);
   if (!ok) return false;
   entry->coverage = atlas->coverage;
@@ -1078,7 +1106,7 @@ bool gfx_init(uint32_t logical_width, uint32_t logical_height) {
     .handle = -1,
     .revision = 0,
   };
-  if (!upload_tiled(&white, &solid, NULL, 8, 8, 8, 8, false)) return false;
+  if (!upload_tiled(&white, &solid, 8, 8, 8, 8, false)) return false;
 
   initialized = true;
   return true;
