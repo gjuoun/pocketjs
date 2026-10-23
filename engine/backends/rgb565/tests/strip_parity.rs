@@ -191,6 +191,25 @@ fn full_matrix_scene() -> (Ui, Vec<u32>) {
         0xff00_2010,
         0xffff_f0c0,
         spec::GradDir::ToBottom as u32,
+        // opaque reversed vertical gradient crossing every band
+        spec::draw_op::GRAD_RECT,
+        xy_word(0, 1),
+        wh_word(3, 9),
+        0xff80_10f0,
+        0xff10_8030,
+        spec::GradDir::ToTop as u32,
+        // translucent vertical gradient with varying alpha over mixed pixels
+        spec::draw_op::GRAD_RECT,
+        xy_word(2, 0),
+        wh_word(9, 10),
+        0x30ff_8000,
+        0xc000_40ff,
+        spec::GradDir::ToBottom as u32,
+        // translucent rect small enough for the CPU blend
+        spec::draw_op::RECT,
+        xy_word(5, 3),
+        wh_word(6, 5),
+        0x6040_ff20,
         // scissored translucent gouraud triangle crossing all strip bands
         spec::draw_op::SCISSOR,
         xy_word(1, 1),
@@ -496,4 +515,259 @@ fn split_srm_band_boundary_matches_software() {
             );
         }
     }
+}
+
+#[test]
+fn occluded_strips_resume_inside_the_scissor_stack() {
+    let mut ui = Ui::new();
+    ui.set_viewport(16.0, 10.0);
+    let words = vec![
+        // hidden by the scissored cover below inside rows 2..6
+        spec::draw_op::RECT,
+        xy_word(0, 0),
+        wh_word(16, 10),
+        0xff10_2030,
+        spec::draw_op::SCISSOR,
+        xy_word(0, 2),
+        wh_word(16, 4),
+        // covers rows 2..6 once the scissor clips it
+        spec::draw_op::GRAD_RECT,
+        xy_word(0, 0),
+        wh_word(16, 10),
+        0xff40_8020,
+        0xff20_40c0,
+        spec::GradDir::ToBottom as u32,
+        spec::draw_op::RECT,
+        xy_word(3, 0),
+        wh_word(4, 10),
+        0x80ff_ffff,
+        spec::draw_op::SCISSOR_POP,
+        // after the pop, this must reach every row again
+        spec::draw_op::RECT,
+        xy_word(0, 0),
+        wh_word(16, 10),
+        0x4000_ff00,
+    ];
+    let full = full_reference(&ui, &words, 16, 10, 1);
+    let mut renderer = renderer(1);
+    let mut tiled = vec![0u16; 16 * 10];
+    for y in 0..10u32 {
+        // Stale pixels expose a skipped clear that the cover does not hide.
+        let mut strip = vec![0xa5a5u16; 16];
+        let region = Rect { x: 0, y, w: 16, h: 1 };
+        renderer
+            .render_strip(&ui, &words, &mut strip, region, &mut NoPpa)
+            .unwrap();
+        tiled[y as usize * 16..(y as usize + 1) * 16].copy_from_slice(&strip);
+    }
+    assert_eq!(tiled, full);
+}
+
+#[test]
+fn small_white_alpha_quads_blend_like_the_software_sampler() {
+    let mut ui = Ui::new_with_raster_density(2);
+    ui.set_viewport(16.0, 10.0);
+    // A white texture whose alpha ramps, like a baked corner disc.
+    let mut texels = Vec::new();
+    for i in 0..64u32 {
+        texels.extend_from_slice(&[255, 255, 255, (i * 4 + 3) as u8]);
+    }
+    let disc = ui.upload_texture(&texels, 8, 8, spec::psm::PSM_8888);
+    assert!(disc >= 0);
+    let mut words = vec![
+        spec::draw_op::RECT,
+        xy_word(0, 0),
+        wh_word(16, 10),
+        0xff30_2010,
+    ];
+    // One-row corner strips at both ends of a box, each tinted differently.
+    for row in 0..6u16 {
+        let v0 = row as f32 / 6.0;
+        let v1 = (row + 1) as f32 / 6.0;
+        for (x, u0, u1) in [(1i16, 0.0f32, 0.5f32), (12, 0.5, 1.0)] {
+            words.extend_from_slice(&[
+                spec::draw_op::TEX_QUAD,
+                disc as u32,
+                xy_word(x, 2 + row as i16),
+                wh_word(3, 1),
+                u0.to_bits(),
+                v0.to_bits(),
+                u1.to_bits(),
+                v1.to_bits(),
+                0xc000_0000 | (row as u32 * 0x0010_2030),
+            ]);
+        }
+    }
+    let full = full_reference(&ui, &words, 16, 10, 2);
+    let mut renderer = renderer(2);
+    let bands: Vec<(u32, u32)> = (0..10).map(|y| (y, 1)).collect();
+    let tiled = assemble_strips(&mut renderer, &ui, &words, 16, &bands, 2, &mut NoPpa);
+    assert_eq!(tiled, full);
+}
+
+fn assemble_indexed_strips(
+    renderer: &mut Renderer,
+    ui: &Ui,
+    words: &[u32],
+    width: usize,
+    bands: &[(u32, u32)],
+    scale: u32,
+    frame: u64,
+) -> Vec<u16> {
+    let physical_width = width * scale as usize;
+    let total_rows: u32 = bands.iter().map(|&(_, h)| h).sum();
+    let mut output = vec![0u16; physical_width * (total_rows * scale) as usize];
+    for &(y, h) in bands {
+        // Stale pixels expose any op the index wrongly skips.
+        let mut strip = vec![0xa5a5u16; physical_width * (h * scale) as usize];
+        let region = Rect { x: 0, y, w: width as u32, h };
+        renderer
+            .render_strip_indexed(frame, ui, words, &mut strip, region, &mut NoPpa)
+            .unwrap_or_else(|| panic!("indexed strip y={y} h={h} failed"));
+        let dst = (y * scale) as usize * physical_width;
+        output[dst..dst + strip.len()].copy_from_slice(&strip);
+    }
+    output
+}
+
+#[test]
+fn indexed_strips_reassemble_the_full_frame_for_every_op_family() {
+    let (ui, words) = full_matrix_scene();
+    for scale in [1, 2] {
+        let full = full_reference(&ui, &words, 16, 10, scale);
+        let mut renderer = renderer(scale);
+        let rows: Vec<(u32, u32)> = (0..10).map(|y| (y, 1)).collect();
+        assert_eq!(assemble_indexed_strips(&mut renderer, &ui, &words, 16, &rows, scale, 1), full);
+        let bands = [(0, 3), (3, 4), (7, 3)];
+        assert_eq!(assemble_indexed_strips(&mut renderer, &ui, &words, 16, &bands, scale, 2), full);
+    }
+}
+
+#[test]
+fn a_new_frame_key_reindexes_the_draw_list() {
+    let (ui, words) = full_matrix_scene();
+    let mut renderer = renderer(1);
+    let rows: Vec<(u32, u32)> = (0..10).map(|y| (y, 1)).collect();
+    // Index an empty list first; the matrix under a new key must not reuse it.
+    assemble_indexed_strips(&mut renderer, &ui, &[], 16, &rows, 1, 7);
+    let full = full_reference(&ui, &words, 16, 10, 1);
+    assert_eq!(assemble_indexed_strips(&mut renderer, &ui, &words, 16, &rows, 1, 8), full);
+}
+
+#[test]
+fn scaled_alpha_textures_sample_like_the_software_sampler() {
+    let mut ui = Ui::new_with_raster_density(2);
+    ui.set_viewport(16.0, 10.0);
+    // A glyph-page-like CLUT8 texture: white entries with ramped alpha and
+    // empty runs, and a 4444 twin.
+    let mut paletted = Vec::new();
+    for entry in 0..256u32 {
+        paletted.extend_from_slice(&[255, 255, 255, entry as u8]);
+    }
+    let indices: Vec<u8> = (0..64u32).map(|i| if i % 5 == 0 { 0 } else { (i * 37 % 256) as u8 }).collect();
+    paletted.extend_from_slice(&indices);
+    let glyphs = ui.upload_texture_flags(&paletted, 8, 8, spec::psm::PSM_T8, spec::img::FLAG_LINEAR);
+    let packed: Vec<u8> = (0..64u32).flat_map(|i| (0x0fff_u16 | (((i * 7) % 16) as u16) << 12).to_le_bytes()).collect();
+    let ramp = ui.upload_texture_flags(&packed, 8, 8, spec::psm::PSM_4444, spec::img::FLAG_LINEAR);
+    assert!(glyphs >= 0 && ramp >= 0);
+    let quad = |tex: i32, x: i16, y: i16, w: u16, h: u16, color: u32| {
+        [
+            spec::draw_op::TEX_QUAD,
+            tex as u32,
+            xy_word(x, y),
+            wh_word(w, h),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
+            1.0f32.to_bits(),
+            color,
+        ]
+    };
+    let mut words = vec![spec::draw_op::RECT, xy_word(0, 0), wh_word(16, 10), 0xff30_2010];
+    // Magnified 21/16 like a lifted row, and minified.
+    words.extend_from_slice(&quad(glyphs, 1, 1, 9, 7, 0xffff_ffff));
+    words.extend_from_slice(&quad(ramp, 9, 2, 6, 5, 0xa040_80ff));
+    words.extend_from_slice(&quad(glyphs, 11, 6, 3, 3, 0x80ff_ffff));
+    let full = full_reference(&ui, &words, 16, 10, 2);
+    let mut renderer = renderer(2);
+    let bands: Vec<(u32, u32)> = (0..10).map(|y| (y, 1)).collect();
+    let tiled = assemble_strips(&mut renderer, &ui, &words, 16, &bands, 2, &mut NoPpa);
+    assert_eq!(tiled, full);
+}
+
+#[test]
+fn ops_under_later_opaque_boxes_keep_their_visible_pixels() {
+    let ui = {
+        let mut ui = Ui::new_with_raster_density(2);
+        ui.set_viewport(16.0, 10.0);
+        ui
+    };
+    let mut words = vec![spec::draw_op::RECT, xy_word(0, 0), wh_word(16, 10), 0xff20_4060];
+    // Translucent shadows, a gradient and a glyph-free quad under two boxes,
+    // one of them inside a scissor that clips its cover.
+    words.extend_from_slice(&[spec::draw_op::RECT, xy_word(1, 2), wh_word(8, 7), 0x5000_0000]);
+    words.extend_from_slice(&[spec::draw_op::RECT, xy_word(0, 1), wh_word(10, 8), 0x2000_0000]);
+    words.extend_from_slice(&[
+        spec::draw_op::GRAD_RECT, xy_word(9, 0), wh_word(6, 9), 0x80ff_0000, 0x4000_ff00,
+        spec::GradDir::ToBottom as u32,
+    ]);
+    words.extend_from_slice(&[spec::draw_op::RECT, xy_word(1, 1), wh_word(8, 7), 0xff30_3030]);
+    words.extend_from_slice(&[spec::draw_op::SCISSOR, xy_word(10, 0), wh_word(3, 10)]);
+    words.extend_from_slice(&[
+        spec::draw_op::GRAD_RECT, xy_word(8, 1), wh_word(8, 6), 0xff10_2030, 0xff60_5040,
+        spec::GradDir::ToBottom as u32,
+    ]);
+    words.push(spec::draw_op::SCISSOR_POP);
+    let full = full_reference(&ui, &words, 16, 10, 2);
+    let mut renderer = renderer(2);
+    for bands in [vec![(0u32, 10u32)], (0..10).map(|y| (y, 1)).collect::<Vec<_>>()] {
+        let tiled = assemble_strips(&mut renderer, &ui, &words, 16, &bands, 2, &mut NoPpa);
+        assert_eq!(tiled, full);
+    }
+}
+
+#[test]
+fn color_textures_sample_like_the_software_sampler() {
+    let mut ui = Ui::new_with_raster_density(2);
+    ui.set_viewport(16.0, 10.0);
+    // A one-color icon whose transparent texels are black, a multi-color
+    // CLUT8 texture and an opaque 5650 texture, nearest and bilinear.
+    let icon: Vec<u8> = (0..64u32)
+        .flat_map(|i| if i % 3 == 0 { [0, 0, 0, 0] } else { [0xd3, 0xd7, 0xdc, (i * 4) as u8] })
+        .collect();
+    let icon_linear = ui.upload_texture_flags(&icon, 8, 8, spec::psm::PSM_8888, spec::img::FLAG_LINEAR);
+    let icon_nearest = ui.upload_texture(&icon, 8, 8, spec::psm::PSM_8888);
+    let mut paletted = Vec::new();
+    for entry in 0..256u32 {
+        paletted.extend_from_slice(&[entry as u8, (255 - entry) as u8, (entry * 3) as u8, 200]);
+    }
+    paletted.extend((0..64u32).map(|i| (i * 13 % 256) as u8));
+    let clut = ui.upload_texture_flags(&paletted, 8, 8, spec::psm::PSM_T8, spec::img::FLAG_LINEAR);
+    let opaque: Vec<u8> = (0..16u32).flat_map(|i| ((i * 4093) as u16).to_le_bytes()).collect();
+    let tile = ui.upload_texture_flags(&opaque, 4, 4, spec::psm::PSM_5650, spec::img::FLAG_LINEAR);
+    assert!(icon_linear >= 0 && icon_nearest >= 0 && clut >= 0 && tile >= 0);
+    let quad = |tex: i32, x: i16, y: i16, w: u16, h: u16, uv: [f32; 4], color: u32| {
+        [
+            spec::draw_op::TEX_QUAD,
+            tex as u32,
+            xy_word(x, y),
+            wh_word(w, h),
+            uv[0].to_bits(),
+            uv[1].to_bits(),
+            uv[2].to_bits(),
+            uv[3].to_bits(),
+            color,
+        ]
+    };
+    let mut words = vec![spec::draw_op::RECT, xy_word(0, 0), wh_word(16, 10), 0xff30_2010];
+    words.extend_from_slice(&quad(icon_linear, 1, 1, 4, 4, [0.0, 0.0, 1.0, 1.0], 0xffff_ffff));
+    words.extend_from_slice(&quad(icon_linear, 6, 1, 5, 3, [0.25, 0.0, 0.875, 0.75], 0x80ff_c080));
+    words.extend_from_slice(&quad(icon_nearest, 1, 6, 6, 3, [0.0, 0.0, 1.0, 1.0], 0xc0ff_ffff));
+    words.extend_from_slice(&quad(clut, 9, 5, 6, 4, [0.0, 0.0, 1.0, 1.0], 0xffff_ffff));
+    words.extend_from_slice(&quad(tile, 12, 0, 3, 3, [0.0, 0.0, 1.0, 1.0], 0xa0ff_ffff));
+    let full = full_reference(&ui, &words, 16, 10, 2);
+    let mut renderer = renderer(2);
+    let bands: Vec<(u32, u32)> = (0..10).map(|y| (y, 1)).collect();
+    let tiled = assemble_strips(&mut renderer, &ui, &words, 16, &bands, 2, &mut NoPpa);
+    assert_eq!(tiled, full);
 }

@@ -187,6 +187,26 @@ const _: () = {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
+pub struct NativeMotion {
+    pub struct_size: usize,
+    pub present: bool,
+    pub destination: NativeRect,
+    pub dx: i32,
+    pub dy: i32,
+}
+const _: () = {
+    let p32 = core::mem::size_of::<usize>() == 4;
+    assert!(core::mem::size_of::<NativeMotion>() == if p32 { 32 } else { 40 });
+    assert!(core::mem::align_of::<NativeMotion>() == if p32 { 4 } else { 8 });
+    assert!(core::mem::offset_of!(NativeMotion, struct_size) == if p32 { 0 } else { 0 });
+    assert!(core::mem::offset_of!(NativeMotion, present) == if p32 { 4 } else { 8 });
+    assert!(core::mem::offset_of!(NativeMotion, destination) == if p32 { 8 } else { 12 });
+    assert!(core::mem::offset_of!(NativeMotion, dx) == if p32 { 24 } else { 28 });
+    assert!(core::mem::offset_of!(NativeMotion, dy) == if p32 { 28 } else { 32 });
+};
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
 pub struct NativeRenderStats {
     pub struct_size: usize,
     pub ppa_fills: u32,

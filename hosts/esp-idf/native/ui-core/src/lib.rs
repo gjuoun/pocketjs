@@ -112,6 +112,10 @@ pub unsafe extern "C" fn pocketjs_native_ui_create(
         return -1;
     }
     let mut ui = Ui::new_with_raster_density(config.raster_density);
+    // The IDF renderer clips in software. Stable motion paint repeats an
+    // op's words when its content moves by whole pixels, so damage tracking
+    // can move the pixels.
+    ui.set_stable_motion_paint(true);
     ui.set_viewport(config.logical_width as f32, config.logical_height as f32);
     if !ui.set_tick_rate(config.tick_hz) {
         return -1;
@@ -475,7 +479,7 @@ pub unsafe extern "C" fn pocketjs_native_ui_texture(
     handle: i32,
     out: *mut NativeTextureView,
 ) -> i32 {
-    let Some(core) = core_mut(core) else {
+    let Some(core) = core.as_ref() else {
         return -1;
     };
     if out.is_null() || (*out).struct_size < core::mem::size_of::<NativeTextureView>() {
@@ -507,7 +511,7 @@ pub unsafe extern "C" fn pocketjs_native_ui_font(
     slot: u32,
     out: *mut NativeFontView,
 ) -> i32 {
-    let Some(core) = core_mut(core) else {
+    let Some(core) = core.as_ref() else {
         return -1;
     };
     if out.is_null() || (*out).struct_size < core::mem::size_of::<NativeFontView>() {

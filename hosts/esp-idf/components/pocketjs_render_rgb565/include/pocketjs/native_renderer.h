@@ -9,4 +9,5 @@ int32_t pocketjs_native_renderer_commit(pocketjs_rgb565_renderer_t * renderer, p
 int32_t pocketjs_native_renderer_create(const pocketjs_rgb565_renderer_config_t * config, pocketjs_rgb565_renderer_t * * output);
 void pocketjs_native_renderer_destroy(pocketjs_rgb565_renderer_t * renderer);
 int32_t pocketjs_native_renderer_prepare(pocketjs_rgb565_renderer_t * renderer, pocketjs_rgb565_target_t * target, const pocketjs_ui_frame_view_t * frame, pocketjs_rgb565_damage_plan_t * output);
+int32_t pocketjs_native_renderer_prepare_motion(pocketjs_rgb565_renderer_t * renderer, pocketjs_rgb565_target_t * target, const pocketjs_ui_frame_view_t * frame, pocketjs_rgb565_damage_plan_t * output, pocketjs_rgb565_motion_t * motion);
 int32_t pocketjs_native_renderer_render_strip(pocketjs_rgb565_renderer_t * renderer, const pocketjs_ui_frame_view_t * frame, uint16_t * destination, size_t destination_pixels, pocketjs_rgb565_rect_t region, const pocketjs_rgb565_accelerator_t * accelerator, pocketjs_rgb565_render_stats_t * output);

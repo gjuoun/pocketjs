@@ -55,6 +55,21 @@ PJS_ABI_ASSERT(offsetof(pocketjs_rgb565_damage_plan_t, regions) == (sizeof(void 
 
 typedef struct {
   size_t struct_size;
+  bool present;
+  pocketjs_rgb565_rect_t destination;
+  int32_t dx;
+  int32_t dy;
+} pocketjs_rgb565_motion_t;
+PJS_ABI_ASSERT(sizeof(pocketjs_rgb565_motion_t) == (sizeof(void *) == 4 ? 32 : 40), "pocketjs_rgb565_motion_t size");
+PJS_ABI_ASSERT(PJS_ABI_ALIGNOF(pocketjs_rgb565_motion_t) == (sizeof(void *) == 4 ? 4 : 8), "pocketjs_rgb565_motion_t alignment");
+PJS_ABI_ASSERT(offsetof(pocketjs_rgb565_motion_t, struct_size) == (sizeof(void *) == 4 ? 0 : 0), "pocketjs_rgb565_motion_t.struct_size");
+PJS_ABI_ASSERT(offsetof(pocketjs_rgb565_motion_t, present) == (sizeof(void *) == 4 ? 4 : 8), "pocketjs_rgb565_motion_t.present");
+PJS_ABI_ASSERT(offsetof(pocketjs_rgb565_motion_t, destination) == (sizeof(void *) == 4 ? 8 : 12), "pocketjs_rgb565_motion_t.destination");
+PJS_ABI_ASSERT(offsetof(pocketjs_rgb565_motion_t, dx) == (sizeof(void *) == 4 ? 24 : 28), "pocketjs_rgb565_motion_t.dx");
+PJS_ABI_ASSERT(offsetof(pocketjs_rgb565_motion_t, dy) == (sizeof(void *) == 4 ? 28 : 32), "pocketjs_rgb565_motion_t.dy");
+
+typedef struct {
+  size_t struct_size;
   uint32_t ppa_fills;
   uint32_t ppa_blends;
   uint32_t ppa_srm;
