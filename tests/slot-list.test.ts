@@ -152,6 +152,36 @@ describe("createMeasuredList", () => {
     });
   });
 
+  test("rows added above the reader keep the row at the offset in place", () => {
+    createRoot((dispose) => {
+      const budget = countBudget(100);
+      const later = items(10);
+      const [list, setList] = createSignal<readonly Item[]>(later);
+      const [offset, setOffset] = createSignal(100);
+      const measured = createMeasuredList({
+        items: list,
+        key: (item: Item) => item.id,
+        measure: (item: Item) => ({ h: 20 * item.lines }),
+        estimate: () => 20,
+        offset,
+        view: 100,
+        overscan: 0,
+        budget,
+        rebase: (delta) => setOffset(offset() + delta),
+      });
+      for (let n = 0; n < 20; n++) frame(budget);
+      const anchor = measured.rows().find((row) => row.y + row.h > offset())!;
+      const screenY = anchor.y - offset();
+      const earlier = Array.from({ length: 5 }, (_, n) => ({ id: 100 + n, lines: 2 }));
+      setList([...earlier, ...later]);
+      for (let n = 0; n < 20; n++) frame(budget);
+      const after = measured.rows().find((row) => row.item.id === anchor.item.id)!;
+      expect(after.y - offset()).toBe(screenY);
+      expect(after.y).toBeGreaterThan(anchor.y);
+      dispose();
+    });
+  });
+
   test("unchanged rows keep their objects across layouts", () => {
     createRoot((dispose) => {
       const budget = countBudget(100);
