@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS "main.c"
     REQUIRES
+        esp_driver_dma
         esp_driver_ppa
         esp_lcd
         pocketjs_esp32p4_ppa

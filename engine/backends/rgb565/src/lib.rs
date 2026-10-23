@@ -11,23 +11,135 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use pocketjs_core::compositor::draw_op_len;
 use pocketjs_core::resources::RenderResources;
 
 use pocketjs_core::damage::{
-    DamagePlan, DamagePolicy, DamageRect as Clip, DamageTarget, DamageTracker,
+    DamageMotion, DamagePlan, DamagePolicy, DamageRect as Clip, DamageTarget, DamageTracker,
     DEFAULT_DAMAGE_REGIONS,
 };
 use pocketjs_core::raster::{
-    coverage_index, linear_sample_coordinates, pack_rgb565, render_scaled_rgb565_over,
-    render_scaled_rgb565_window_over,
+    blend_rgb565_pixel, coverage_index, lerp_color, linear_sample_coordinates, pack_rgb565,
+    render_scaled_rgb565_over, render_scaled_rgb565_window_over, texel, LinearSample,
 };
 #[cfg(test)]
 use pocketjs_core::Ui;
 use pocketjs_core::{spec, TexView};
 
 const MASK_ALIGNMENT: usize = 128;
+/// Translucent work up to this many physical pixels blends on the CPU: a PPA
+/// transaction costs about as much as blending this area in software.
+const CPU_BLEND_MAX_PIXELS: u32 = 2048;
 const CLIP_DEPTH: usize = 32;
 const TEXTURE_CLASS_CACHE_LEN: usize = 64;
+
+/// Logical rows one DrawList op can touch. Scissor ops span every row so a
+/// strip that skips other ops still keeps the clip stack.
+#[derive(Clone, Copy)]
+struct OpSpan {
+    start: u32,
+    y0: i32,
+    y1: i32,
+}
+
+impl OpSpan {
+    fn touches(&self, band: Clip) -> bool {
+        self.y0 < band.y1 && self.y1 > band.y0
+    }
+}
+
+/// Op offsets in painter order: every op when `spans` is None, otherwise
+/// the indexed ops whose rows meet `band`, starting at word offset `from`.
+struct OpCursor<'a> {
+    spans: Option<&'a [OpSpan]>,
+    band: Clip,
+    cursor: usize,
+}
+
+impl<'a> OpCursor<'a> {
+    fn new(spans: Option<&'a [OpSpan]>, band: Clip, from: usize) -> Self {
+        let cursor = spans.map_or(from, |spans| spans.partition_point(|span| (span.start as usize) < from));
+        Self { spans, band, cursor }
+    }
+
+    /// The next op at or after word offset `from`, or None at the end.
+    fn next(&mut self, words: &[u32], from: usize) -> Option<usize> {
+        let Some(spans) = self.spans else {
+            return (from < words.len()).then_some(from);
+        };
+        while self.cursor < spans.len()
+            && ((spans[self.cursor].start as usize) < from || !spans[self.cursor].touches(self.band))
+        {
+            self.cursor += 1;
+        }
+        spans.get(self.cursor).map(|span| span.start as usize)
+    }
+}
+
+/// Painter state at one DrawList position: the op index and its clip stack.
+#[derive(Clone, Copy)]
+struct PaintStart {
+    screen: Clip,
+    index: usize,
+    clip: Clip,
+    stack: [Clip; CLIP_DEPTH],
+    depth: usize,
+}
+
+impl PaintStart {
+    fn first(screen: Clip) -> Self {
+        Self {
+            screen,
+            index: 0,
+            clip: screen,
+            stack: [screen; CLIP_DEPTH],
+            depth: 0,
+        }
+    }
+
+    /// The last opaque RECT or GRAD_RECT that covers all of `screen` hides
+    /// the clear and every earlier op, so painting starts there. Any op the
+    /// scan cannot decode disables the shortcut.
+    fn occluding(words: &[u32], screen: Clip, spans: Option<&[OpSpan]>) -> Option<Self> {
+        let mut state = Self::first(screen);
+        let mut found = None;
+        let mut ops = OpCursor::new(spans, screen, 0);
+        let mut next = 0usize;
+        while let Some(i) = ops.next(words, next) {
+            state.index = i;
+            let len = draw_op_len(words, i).filter(|len| i + len <= words.len())?;
+            match words[i] {
+                spec::draw_op::RECT | spec::draw_op::GRAD_RECT => {
+                    let opaque = words[i + 3] >> 24 == 255
+                        && (words[i] == spec::draw_op::RECT || words[i + 4] >> 24 == 255);
+                    if opaque && logical_rect(words[i + 1], words[i + 2]).intersect(state.clip) == screen
+                    {
+                        found = Some(state);
+                    }
+                }
+                spec::draw_op::SCISSOR => {
+                    if state.depth >= CLIP_DEPTH {
+                        return None;
+                    }
+                    state.stack[state.depth] = state.clip;
+                    state.depth += 1;
+                    state.clip = screen.intersect(logical_rect(words[i + 1], words[i + 2]));
+                }
+                spec::draw_op::SCISSOR_POP => {
+                    if state.depth > 0 {
+                        state.depth -= 1;
+                        state.clip = state.stack[state.depth];
+                    } else {
+                        state.clip = screen;
+                    }
+                }
+                _ => {}
+            }
+            next = i + len;
+        }
+        found
+    }
+}
 const MAX_DAMAGE_REGIONS: usize = DEFAULT_DAMAGE_REGIONS;
 const FULL_REDRAW_PERCENT: u8 = 75;
 const DAMAGE_TARGET_SIGNATURE: u64 = u32::from_be_bytes(*b"PPA5") as u64;
@@ -173,6 +285,16 @@ pub struct Renderer {
     fallback_words: Vec<u32>,
     alpha_texture_cache: Vec<(i32, bool)>,
     raster_revision: u64,
+    /// Translucent work at or below this physical area blends on the CPU;
+    /// zero routes every blend to the PPA.
+    cpu_blend_max_pixels: u32,
+    /// Row spans of the DrawList indexed for frame `spans_key`; `spans_valid`
+    /// is false when that list holds an op the index does not decode.
+    spans: Vec<OpSpan>,
+    spans_key: Option<u64>,
+    spans_valid: bool,
+    /// Opaque covers of the region being painted (see `collect_covers`).
+    covers: Vec<(u32, Clip)>,
 }
 
 impl Renderer {
@@ -189,6 +311,11 @@ impl Renderer {
             fallback_words: Vec::with_capacity(16),
             alpha_texture_cache: Vec::new(),
             raster_revision: 0,
+            cpu_blend_max_pixels: CPU_BLEND_MAX_PIXELS,
+            spans: Vec::new(),
+            spans_key: None,
+            spans_valid: false,
+            covers: Vec::new(),
         })
     }
 
@@ -248,6 +375,25 @@ impl Renderer {
             .ok()
     }
 
+    /// [`prepare_damage`](Self::prepare_damage) that may also return a
+    /// [`DamageMotion`]: move its pixels in the target before repainting the
+    /// plan's regions. The snapshot is unchanged; `target` keeps the decoded
+    /// list for [`commit_damage`](Self::commit_damage).
+    pub fn prepare_damage_with_motion(
+        &mut self,
+        target: &mut RenderTargetState,
+        ui: &impl RenderResources,
+        words: &[u32],
+    ) -> Option<RenderDamagePlan> {
+        self.sync_resources(ui);
+        let damage_target = self.damage_target(ui)?;
+        target
+            .prepare_with_motion(ui, words, damage_target)
+            .ok()?
+            .with_policy(DamagePolicy::new(FULL_REDRAW_PERCENT))
+            .ok()
+    }
+
     /// Record a successfully presented DrawList in one persistent target.
     pub fn commit_damage(
         &self,
@@ -261,6 +407,17 @@ impl Renderer {
         };
         target.commit(ui, words, damage_target);
         true
+    }
+
+    /// [`commit_damage`](Self::commit_damage) for a caller that rendered
+    /// exactly the list its last
+    /// [`prepare_damage_with_motion`](Self::prepare_damage_with_motion)
+    /// prepared. Returns false, changing nothing, when no list is pending.
+    pub fn commit_prepared_damage(&self, target: &mut RenderTargetState, ui: &impl RenderResources) -> bool {
+        match self.damage_target(ui) {
+            Some(damage_target) => target.commit_prepared(ui, damage_target),
+            None => false,
+        }
     }
 
     /// Invalidate a persistent target after an aborted or partial update.
@@ -310,6 +467,44 @@ impl Renderer {
         result
     }
 
+    /// [`render_incremental`](Self::render_incremental) that moves retained
+    /// pixels inside `destination` when content only moved.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_incremental_with_motion<O: PpaOps>(
+        &mut self,
+        target: &mut RenderTargetState,
+        ui: &impl RenderResources,
+        words: &[u32],
+        destination: &mut [u16],
+        width: u32,
+        height: u32,
+        ppa: &mut O,
+    ) -> Option<RenderStats> {
+        self.target_screen(ui, destination, width, height)?;
+        let damage = self.prepare_damage_with_motion(target, ui, words)?;
+        if let Some(motion) = damage.motion() {
+            move_pixels(destination, width, self.config.scale, motion);
+        }
+        let result = self.render_damage(
+            ui,
+            words,
+            destination,
+            width,
+            height,
+            &damage,
+            damage.is_full_redraw(),
+            ppa,
+        );
+        if result.is_some() {
+            if !self.commit_damage(target, ui, words) {
+                return None;
+            }
+        } else {
+            self.abort_damage(target);
+        }
+        result
+    }
+
     /// Render one global logical dirty rectangle into a tightly packed
     /// full-width horizontal strip.
     ///
@@ -326,6 +521,84 @@ impl Renderer {
         destination: &mut [u16],
         region: Rect,
         ppa: &mut O,
+    ) -> Option<RenderStats> {
+        self.render_strip_spans(ui, words, destination, region, ppa, None)
+    }
+
+    /// [`render_strip`](Self::render_strip) for hosts that render many strips
+    /// of one DrawList. `frame` identifies the list (an epoch that changes
+    /// with every draw); the first strip indexes each op's rows and later
+    /// strips visit only the ops that reach their band.
+    pub fn render_strip_indexed<O: PpaOps>(
+        &mut self,
+        frame: u64,
+        ui: &impl RenderResources,
+        words: &[u32],
+        destination: &mut [u16],
+        region: Rect,
+        ppa: &mut O,
+    ) -> Option<RenderStats> {
+        if self.spans_key != Some(frame) {
+            self.spans_valid = self.index_ops(ui, words);
+            self.spans_key = Some(frame);
+        }
+        let spans = core::mem::take(&mut self.spans);
+        let valid = self.spans_valid;
+        let stats = self.render_strip_spans(ui, words, destination, region, ppa, valid.then_some(&spans[..]));
+        self.spans = spans;
+        stats
+    }
+
+    /// Record the logical rows each op can touch. Returns false for a list
+    /// with an op the renderer does not decode; strips then walk every op.
+    fn index_ops(&mut self, ui: &impl RenderResources, words: &[u32]) -> bool {
+        self.spans.clear();
+        let everywhere = Clip {
+            x0: i32::MIN / 2,
+            y0: i32::MIN / 2,
+            x1: i32::MAX / 2,
+            y1: i32::MAX / 2,
+        };
+        let mut i = 0usize;
+        while i < words.len() {
+            let Some(len) = draw_op_len(words, i).filter(|len| i + len <= words.len()) else {
+                return false;
+            };
+            let rows = match words[i] {
+                spec::draw_op::RECT | spec::draw_op::GRAD_RECT => {
+                    Some(logical_rect(words[i + 1], words[i + 2]))
+                }
+                spec::draw_op::TEX_QUAD => Some(logical_rect(words[i + 2], words[i + 3])),
+                spec::draw_op::GLYPH_RUN => Some(glyph_run_bounds(ui, &words[i..i + len], everywhere)),
+                spec::draw_op::TRI => Some(triangle_bounds([words[i + 1], words[i + 2], words[i + 3]], everywhere)),
+                spec::draw_op::TEX_TRI => {
+                    Some(triangle_bounds([words[i + 2], words[i + 5], words[i + 8]], everywhere))
+                }
+                spec::draw_op::SCISSOR | spec::draw_op::SCISSOR_POP => Some(everywhere),
+                // Painting skips application surfaces on this target.
+                spec::draw_op::SURFACE_QUAD => None,
+                _ => return false,
+            };
+            if let Some(rows) = rows.filter(|rows| !rows.is_empty()) {
+                self.spans.push(OpSpan {
+                    start: i as u32,
+                    y0: rows.y0,
+                    y1: rows.y1,
+                });
+            }
+            i += len;
+        }
+        true
+    }
+
+    fn render_strip_spans<O: PpaOps>(
+        &mut self,
+        ui: &impl RenderResources,
+        words: &[u32],
+        destination: &mut [u16],
+        region: Rect,
+        ppa: &mut O,
+        spans: Option<&[OpSpan]>,
     ) -> Option<RenderStats> {
         self.sync_resources(ui);
         if region.is_empty() {
@@ -368,12 +641,15 @@ impl Renderer {
         };
 
         self.ensure_mask(destination.len());
-        if local.area() >= self.config.min_fill_pixels
-            && ppa.fill_rgb565(destination, width, height, local, 0)
-        {
-            stats.ppa_fills += 1;
-        } else {
-            fill_rgb565_rect(destination, width, local, 0);
+        let start = PaintStart::occluding(words, clip, spans);
+        if start.is_none() {
+            if local.area() >= self.config.min_fill_pixels
+                && ppa.fill_rgb565(destination, width, height, local, 0)
+            {
+                stats.ppa_fills += 1;
+            } else {
+                fill_rgb565_rect(destination, width, local, 0);
+            }
         }
         self.render_region(
             ui,
@@ -382,7 +658,8 @@ impl Renderer {
             width,
             height,
             surface,
-            clip,
+            start.unwrap_or(PaintStart::first(clip)),
+            spans,
             ppa,
             &mut stats,
         )?;
@@ -465,12 +742,15 @@ impl Renderer {
         self.ensure_mask(destination.len());
         for &region in damage.regions() {
             let physical = local_physical_rect(region, surface, scale);
-            if physical.area() >= self.config.min_fill_pixels
-                && ppa.fill_rgb565(destination, width, height, physical, 0)
-            {
-                stats.ppa_fills += 1;
-            } else {
-                fill_rgb565_rect(destination, width, physical, 0);
+            let start = PaintStart::occluding(words, region, None);
+            if start.is_none() {
+                if physical.area() >= self.config.min_fill_pixels
+                    && ppa.fill_rgb565(destination, width, height, physical, 0)
+                {
+                    stats.ppa_fills += 1;
+                } else {
+                    fill_rgb565_rect(destination, width, physical, 0);
+                }
             }
             self.render_region(
                 ui,
@@ -479,7 +759,8 @@ impl Renderer {
                 width,
                 height,
                 surface,
-                region,
+                start.unwrap_or(PaintStart::first(region)),
+                None,
                 ppa,
                 &mut stats,
             )?;
@@ -496,41 +777,45 @@ impl Renderer {
         width: u32,
         height: u32,
         surface: Clip,
-        screen: Clip,
+        start: PaintStart,
+        spans: Option<&[OpSpan]>,
         ppa: &mut O,
         stats: &mut RenderStats,
     ) -> Option<()> {
-        let mut stack = [screen; CLIP_DEPTH];
-        let mut depth = 0usize;
-        let mut clip = screen;
-        let mut i = 0usize;
-        while i < words.len() {
+        let screen = start.screen;
+        let mut covers = core::mem::take(&mut self.covers);
+        collect_covers(words, &start, spans, &mut covers);
+        let PaintStart {
+            index: mut i,
+            mut clip,
+            mut stack,
+            mut depth,
+            ..
+        } = start;
+        let mut ops = OpCursor::new(spans, screen, i);
+        while let Some(next) = ops.next(words, i) {
+            i = next;
             match words[i] {
                 spec::draw_op::RECT if i + 4 <= words.len() => {
                     let rect = logical_rect(words[i + 1], words[i + 2]).intersect(clip);
                     let op = &words[i..i + 4];
-                    if !rect.is_empty()
-                        && !self.try_rect(
-                            destination,
-                            width,
-                            height,
-                            surface,
-                            rect,
-                            words[i + 3],
-                            ppa,
-                            stats,
-                        )
-                    {
-                        self.software_op(ui, destination, surface, clip, op, stats);
+                    let (pieces, count) = visible_pieces(&covers, i, rect, words[i + 3] >> 24 != 255);
+                    for &piece in &pieces[..count] {
+                        if !self.try_rect(destination, width, height, surface, piece, words[i + 3], ppa, stats) {
+                            self.software_op(ui, destination, surface, piece, op, stats);
+                        }
                     }
                     i += 4;
                 }
                 spec::draw_op::GRAD_RECT if i + 6 <= words.len() => {
-                    if !logical_rect(words[i + 1], words[i + 2])
-                        .intersect(clip)
-                        .is_empty()
-                    {
-                        self.software_op(ui, destination, surface, clip, &words[i..i + 6], stats);
+                    let op = &words[i..i + 6];
+                    let rect = logical_rect(words[i + 1], words[i + 2]).intersect(clip);
+                    let translucent = words[i + 3] >> 24 != 255 || words[i + 4] >> 24 != 255;
+                    let (pieces, count) = visible_pieces(&covers, i, rect, translucent);
+                    for &piece in &pieces[..count] {
+                        if !self.try_grad_rect(destination, width, surface, piece, op) {
+                            self.software_op(ui, destination, surface, piece, op, stats);
+                        }
                     }
                     i += 6;
                 }
@@ -541,7 +826,7 @@ impl Renderer {
                         return None;
                     }
                     let op = &words[i..next];
-                    if !glyph_run_bounds(ui, op, clip).is_empty()
+                    if visible_pieces(&covers, i, glyph_run_bounds(ui, op, clip), false).1 != 0
                         && !self.try_glyph_run(
                             ui,
                             destination,
@@ -559,10 +844,8 @@ impl Renderer {
                     i = next;
                 }
                 spec::draw_op::TEX_QUAD if i + 9 <= words.len() => {
-                    if logical_rect(words[i + 2], words[i + 3])
-                        .intersect(clip)
-                        .is_empty()
-                    {
+                    let rect = logical_rect(words[i + 2], words[i + 3]).intersect(clip);
+                    if visible_pieces(&covers, i, rect, false).1 == 0 {
                         i += 9;
                         continue;
                     }
@@ -625,6 +908,7 @@ impl Renderer {
                 _ => return None,
             }
         }
+        self.covers = covers;
         Some(())
     }
 
@@ -649,6 +933,15 @@ impl Renderer {
                 stats.ppa_fills += 1;
                 return true;
             }
+        } else if a < 255
+            && self.cpu_blend_max_pixels > 0
+            && (rect.area() <= self.cpu_blend_max_pixels || flat_row(destination, width, rect))
+        {
+            for row in rect.y..rect.y + rect.h {
+                let start = row as usize * width as usize + rect.x as usize;
+                blend_span(&mut destination[start..start + rect.w as usize], r, g, b, a);
+            }
+            return true;
         } else if rect.area() >= self.config.min_blend_pixels {
             let mask = self.mask_mut();
             fill_mask_rect(mask, width, rect, a as u8);
@@ -666,6 +959,51 @@ impl Renderer {
             }
         }
         false
+    }
+
+    /// Vertical gradients paint whole rows: opaque rows fill, translucent rows
+    /// blend. Row colors come from the software interpreter's `lerp_color` at
+    /// the same physical pixel centers.
+    fn try_grad_rect(
+        &self,
+        destination: &mut [u16],
+        width: u32,
+        surface: Clip,
+        clip: Clip,
+        op: &[u32],
+    ) -> bool {
+        let (from, to, dir) = (op[3], op[4], op[5]);
+        let vertical = dir == spec::GradDir::ToBottom as u32 || dir == spec::GradDir::ToTop as u32;
+        if !vertical {
+            return false;
+        }
+        let (a, b) = if dir == spec::GradDir::ToTop as u32 {
+            (to, from)
+        } else {
+            (from, to)
+        };
+        let logical = logical_rect(op[1], op[2]);
+        let scale = self.config.scale as i32;
+        let y = logical.y0 * scale;
+        let h = (logical.y1 - logical.y0) * scale;
+        let rect = local_physical_rect(logical.intersect(clip), surface, self.config.scale);
+        if h <= 0 || rect.is_empty() {
+            return true;
+        }
+        let inv = 1.0f32 / h as f32;
+        let origin = surface.y0 * scale;
+        for row in rect.y..rect.y + rect.h {
+            let f = ((origin + row as i32 - y) as f32 + 0.5) * inv;
+            let (r, g, b, alpha) = channels(lerp_color(a, b, f));
+            let start = row as usize * width as usize + rect.x as usize;
+            let span = &mut destination[start..start + rect.w as usize];
+            if alpha >= 255 {
+                fill_span(span, pack_rgb565(r, g, b));
+            } else {
+                blend_span(span, r, g, b, alpha);
+            }
+        }
+        true
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -712,6 +1050,7 @@ impl Renderer {
         if rect.is_empty() || rect.area() < self.config.min_blend_pixels {
             return false;
         }
+        let cpu_blend_max_pixels = self.cpu_blend_max_pixels;
         let mask = self.mask_mut();
         fill_mask_rect(mask, width, rect, 0);
         let density = atlas.raster_density as i32;
@@ -729,6 +1068,34 @@ impl Renderer {
             let y0 = (gy * scale).max(global_rect.y as i32);
             let x1 = ((gx + cell_w) * scale).min((global_rect.x + global_rect.w) as i32);
             let y1 = ((gy + cell_h) * scale).min((global_rect.y + global_rect.h) as i32);
+            if density == scale && x0 < x1 {
+                // One atlas sample per output pixel: copy coverage rows and
+                // skip the empty cell padding.
+                let sx0 = (x0 - gx * scale) as usize;
+                let n = (x1 - x0) as usize;
+                let local_x = (x0 - surface.x0 * scale) as usize;
+                for py in y0..y1 {
+                    let sy = coverage_index(py - gy * scale, scale, density, coverage_h);
+                    let source = &rows[sy * bpr + sx0..sy * bpr + sx0 + n];
+                    let start = (py - surface.y0 * scale) as usize * width as usize + local_x;
+                    for (target, &coverage) in mask[start..start + n].iter_mut().zip(source) {
+                        if coverage == 0 {
+                            continue;
+                        }
+                        let value = if a == 255 {
+                            coverage
+                        } else {
+                            ((coverage as u32 * a + 127) / 255) as u8
+                        };
+                        if *target == 0 {
+                            *target = value;
+                        } else {
+                            composite_mask(target, value);
+                        }
+                    }
+                }
+                continue;
+            }
             for py in y0..y1 {
                 let sy = coverage_index(py - gy * scale, scale, density, coverage_h);
                 let row = &rows[sy * bpr..];
@@ -742,6 +1109,10 @@ impl Renderer {
                     );
                 }
             }
+        }
+        if rect.area() <= cpu_blend_max_pixels {
+            blend_mask_rect(mask, destination, width, rect, [r, g, b]);
+            return true;
         }
         if ppa.blend_a8_rgb565(
             destination,
@@ -806,11 +1177,11 @@ impl Renderer {
                     }
                 }
             }
-            return None;
+            return Some(self.color_quad(&view, op, destination, width, surface, clip, start));
         }
 
         if !self.is_white_alpha_texture(handle, &view) {
-            return None;
+            return Some(self.color_quad(&view, op, destination, width, surface, clip, start));
         }
         let modulate = op[8];
         let mut end = start;
@@ -828,10 +1199,27 @@ impl Renderer {
             return Some(end);
         }
         let rect = local_physical_rect(bounds, surface, self.config.scale);
-        if rect.is_empty() || rect.area() < self.config.min_blend_pixels {
+        if rect.is_empty()
+            || (rect.area() > self.cpu_blend_max_pixels && rect.area() < self.config.min_blend_pixels)
+        {
             return None;
         }
         let scale = self.config.scale;
+        let cpu_blend_max_pixels = self.cpu_blend_max_pixels;
+        let run = &words[start..end];
+        let quad_rect =
+            |quad: &[u32]| local_physical_rect(logical_rect(quad[2], quad[3]).intersect(clip), surface, scale);
+        let covered: u32 = run.chunks_exact(9).map(|quad| quad_rect(quad).area()).sum();
+        if covered <= cpu_blend_max_pixels && covered * 2 < rect.area() && quads_disjoint(run, clip) {
+            // Rounded-box corners: blend each quad on its own bounds instead
+            // of the whole box. Disjoint quads touch every pixel once, so this
+            // equals compositing them into one mask first.
+            let mut sink = BlendSink { destination: &mut *destination, color: [r, g, b] };
+            for quad in run.chunks_exact(9) {
+                for_each_quad_alpha(&view, quad, surface, clip, scale, width, a as u8, &mut sink);
+            }
+            return Some(end);
+        }
         let mask = self.mask_mut();
         fill_mask_rect(mask, width, rect, 0);
         let mut cursor = start;
@@ -848,6 +1236,10 @@ impl Renderer {
             );
             cursor += 9;
         }
+        if rect.area() <= cpu_blend_max_pixels {
+            blend_mask_rect(mask, destination, width, rect, [r, g, b]);
+            return Some(end);
+        }
         if ppa.blend_a8_rgb565(
             destination,
             width,
@@ -862,6 +1254,34 @@ impl Renderer {
         } else {
             None
         }
+    }
+
+    /// Blend one TEX_QUAD of any color texture on the CPU, exactly as the
+    /// core rasterizer samples, modulates and blends it. Returns the next op.
+    #[allow(clippy::too_many_arguments)]
+    fn color_quad(
+        &self,
+        view: &TexView<'_>,
+        op: &[u32],
+        destination: &mut [u16],
+        width: u32,
+        surface: Clip,
+        clip: Clip,
+        start: usize,
+    ) -> usize {
+        let modulate = op[8];
+        let identity = modulate == 0xffff_ffff;
+        let (mr, mg, mb, ma) = channels(modulate);
+        for_each_quad_texel(view, op, surface, clip, self.config.scale, width, |index, mut r, mut g, mut b, mut a| {
+            if !identity {
+                r = (r * mr + 127) / 255;
+                g = (g * mg + 127) / 255;
+                b = (b * mb + 127) / 255;
+                a = (a * ma + 127) / 255;
+            }
+            blend_rgb565_pixel(&mut destination[index], r, g, b, a);
+        });
+        start + 9
     }
 
     fn software_op(
@@ -1039,8 +1459,192 @@ fn local_physical_rect(clip: Clip, surface: Clip, scale: u32) -> Rect {
 fn fill_rgb565_rect(destination: &mut [u16], stride: u32, rect: Rect, color: u16) {
     for y in rect.y..rect.y + rect.h {
         let start = y as usize * stride as usize + rect.x as usize;
-        destination[start..start + rect.w as usize].fill(color);
+        fill_span(&mut destination[start..start + rect.w as usize], color);
     }
+}
+
+/// Blend one color over a span. A run of equal destination pixels reuses the
+/// first result, so a translucent layer over a flat backdrop costs a fill.
+fn blend_span(span: &mut [u16], r: u32, g: u32, b: u32, a: u32) {
+    let Some(&first) = span.first() else {
+        return;
+    };
+    let mut source = first;
+    let mut result = first;
+    blend_rgb565_pixel(&mut result, r, g, b, a);
+    for pixel in span {
+        if *pixel != source {
+            source = *pixel;
+            result = source;
+            blend_rgb565_pixel(&mut result, r, g, b, a);
+        }
+        *pixel = result;
+    }
+}
+
+/// Whether the first row under `rect` holds at most four runs of equal
+/// pixels, so a CPU blend reuses its results across nearly every pixel.
+fn flat_row(destination: &[u16], stride: u32, rect: Rect) -> bool {
+    let start = rect.y as usize * stride as usize + rect.x as usize;
+    let row = &destination[start..start + rect.w as usize];
+    row.windows(2).filter(|pair| pair[0] != pair[1]).take(4).count() < 4
+}
+
+/// Later opaque covers checked for each op, and the pieces one op keeps.
+const COVERS_AHEAD: usize = 8;
+const MAX_PIECES: usize = 8;
+
+/// The opaque RECT and GRAD_RECT ops of a region from `start` on, by word
+/// offset, clipped to their scissors. Each paints every pixel of its rect, so
+/// it hides what earlier ops paint there. Empty when an op does not decode.
+fn collect_covers(words: &[u32], start: &PaintStart, spans: Option<&[OpSpan]>, covers: &mut Vec<(u32, Clip)>) {
+    covers.clear();
+    let screen = start.screen;
+    let (mut clip, mut stack, mut depth) = (start.clip, start.stack, start.depth);
+    let mut ops = OpCursor::new(spans, screen, start.index);
+    let mut next = start.index;
+    while let Some(i) = ops.next(words, next) {
+        let Some(len) = draw_op_len(words, i).filter(|len| i + len <= words.len()) else {
+            covers.clear();
+            return;
+        };
+        match words[i] {
+            spec::draw_op::RECT | spec::draw_op::GRAD_RECT => {
+                let opaque = words[i + 3] >> 24 == 255
+                    && (words[i] == spec::draw_op::RECT || words[i + 4] >> 24 == 255);
+                let rect = logical_rect(words[i + 1], words[i + 2]).intersect(clip);
+                if opaque && !rect.is_empty() {
+                    covers.push((i as u32, rect));
+                }
+            }
+            spec::draw_op::SCISSOR => {
+                if depth >= CLIP_DEPTH {
+                    covers.clear();
+                    return;
+                }
+                stack[depth] = clip;
+                depth += 1;
+                clip = screen.intersect(logical_rect(words[i + 1], words[i + 2]));
+            }
+            spec::draw_op::SCISSOR_POP => {
+                if depth > 0 {
+                    depth -= 1;
+                    clip = stack[depth];
+                } else {
+                    clip = screen;
+                }
+            }
+            _ => {}
+        }
+        next = i + len;
+    }
+}
+
+/// The parts of `rect` that the covers painted after word offset `at` leave
+/// visible, as up to `MAX_PIECES` rectangles; with `split` false, `rect`
+/// itself unless the covers hide all of it. Translucent ops split: blending
+/// costs per pixel, while splitting a fill only adds operations. A cover
+/// that would split the pieces further is skipped: painting hidden pixels
+/// is still exact.
+fn visible_pieces(covers: &[(u32, Clip)], at: usize, rect: Clip, split: bool) -> ([Clip; MAX_PIECES], usize) {
+    let mut pieces = [Clip::empty(); MAX_PIECES];
+    if rect.is_empty() {
+        return (pieces, 0);
+    }
+    pieces[0] = rect;
+    let mut count = 1;
+    let later = covers.partition_point(|&(offset, _)| offset as usize <= at);
+    for &(_, cover) in covers[later..].iter().take(COVERS_AHEAD) {
+        if count == 0 {
+            break;
+        }
+        if pieces[..count].iter().all(|piece| piece.intersect(cover).is_empty()) {
+            continue;
+        }
+        let mut next = [Clip::empty(); MAX_PIECES];
+        let mut kept = 0;
+        let fits = pieces[..count].iter().all(|piece| {
+            piece.subtract(cover).into_iter().filter(|part| !part.is_empty()).all(|part| {
+                if kept == MAX_PIECES {
+                    return false;
+                }
+                next[kept] = part;
+                kept += 1;
+                true
+            })
+        });
+        if fits {
+            pieces = next;
+            count = kept;
+        }
+    }
+    if !split && count > 0 {
+        pieces[0] = rect;
+        count = 1;
+    }
+    (pieces, count)
+}
+
+/// Whether no two quads of a TEX_QUAD run overlap inside `clip`.
+fn quads_disjoint(run: &[u32], clip: Clip) -> bool {
+    const MAX_QUADS: usize = 8;
+    let count = run.len() / 9;
+    if count > MAX_QUADS {
+        return false;
+    }
+    let mut rects = [Clip::empty(); MAX_QUADS];
+    for (index, quad) in run.chunks_exact(9).enumerate() {
+        rects[index] = logical_rect(quad[2], quad[3]).intersect(clip);
+        if rects[..index].iter().any(|other| !other.intersect(rects[index]).is_empty()) {
+            return false;
+        }
+    }
+    true
+}
+
+/// CPU twin of the PPA A8 blend: each mask byte is the source alpha.
+fn blend_mask_rect(mask: &[u8], destination: &mut [u16], stride: u32, rect: Rect, color: [u32; 3]) {
+    for row in rect.y..rect.y + rect.h {
+        let start = row as usize * stride as usize + rect.x as usize;
+        let end = start + rect.w as usize;
+        for (pixel, &alpha) in destination[start..end].iter_mut().zip(&mask[start..end]) {
+            if alpha != 0 {
+                blend_rgb565_pixel(pixel, color[0], color[1], color[2], alpha as u32);
+            }
+        }
+    }
+}
+
+/// Move a motion's pixels inside a full framebuffer `width` pixels wide.
+/// Rows are copied in the order that reads each source row before any write
+/// reaches it.
+pub fn move_pixels(destination: &mut [u16], width: u32, scale: u32, motion: DamageMotion) {
+    let scale = scale as i32;
+    let (dx, dy) = (motion.dx * scale, motion.dy * scale);
+    let target = motion.destination;
+    let (x0, x1) = ((target.x0 * scale) as usize, (target.x1 * scale) as usize);
+    let rows = target.y0 * scale..target.y1 * scale;
+    let mut copy_row = |y: i32| {
+        let to = y as usize * width as usize;
+        let from = (y - dy) as usize * width as usize;
+        let span = x1 - x0;
+        let source = (from as isize + x0 as isize - dx as isize) as usize;
+        destination.copy_within(source..source + span, to + x0);
+    };
+    if dy > 0 {
+        rows.rev().for_each(&mut copy_row);
+    } else {
+        rows.for_each(&mut copy_row);
+    }
+}
+
+/// Fill RGB565 pixels two at a time through aligned 32-bit stores.
+fn fill_span(span: &mut [u16], color: u16) {
+    // SAFETY: every u32 bit pattern is two valid u16 values.
+    let (head, body, tail) = unsafe { span.align_to_mut::<u32>() };
+    head.fill(color);
+    body.fill(color as u32 * 0x0001_0001);
+    tail.fill(color);
 }
 
 #[inline]
@@ -1153,13 +1757,73 @@ fn is_white_alpha_texture(view: &TexView<'_>) -> bool {
             let Some(palette) = view.palette else {
                 return false;
             };
-            view.pixels[..count].iter().all(|&index| {
-                let p = index as usize * 4;
-                let white = palette[p] == 255 && palette[p + 1] == 255 && palette[p + 2] == 255;
-                white || (!view.linear && palette[p + 3] == 0)
-            })
+            let white_entry = |p: &[u8]| {
+                (p[0] == 255 && p[1] == 255 && p[2] == 255) || (!view.linear && p[3] == 0)
+            };
+            // A palette of white entries makes every pixel white without a
+            // pixel scan; glyph pages are large and classified every frame.
+            palette.chunks_exact(4).all(white_entry)
+                || view.pixels[..count]
+                    .iter()
+                    .all(|&index| white_entry(&palette[index as usize * 4..index as usize * 4 + 4]))
         }
         _ => false,
+    }
+}
+
+/// Bilinear alphas for one output row: `columns` hold each pixel's texel
+/// pair and weight, `rows` the two texel row offsets and their weight, and
+/// `texel` reads one texel's alpha. Matches [`sample_separable`].
+#[inline(always)]
+fn bilinear_row(
+    texel: impl Fn(usize) -> u32,
+    columns: &[LinearSample],
+    (top, bottom, fy): (usize, usize, u32),
+    global_alpha: u8,
+    start: usize,
+    sink: &mut impl AlphaSink,
+) {
+    let lerp = |a: u32, b: u32, f: u32| (a * (256 - f) + b * f) >> 8;
+    for (offset, column) in columns.iter().enumerate() {
+        let (x0, x1) = (column.x0 as usize, column.x1 as usize);
+        let (a00, a01) = (texel(top + x0), texel(top + x1));
+        let (a10, a11) = (texel(bottom + x0), texel(bottom + x1));
+        let mut alpha = if a00 | a01 | a10 | a11 == 0 {
+            0
+        } else {
+            lerp(lerp(a00, a01, column.fx), lerp(a10, a11, column.fx), fy)
+        };
+        if global_alpha != 255 {
+            alpha = (alpha * global_alpha as u32 + 127) / 255;
+        }
+        sink.pixel(start + offset, alpha);
+    }
+}
+
+/// Visit the alphas of `count` consecutive texels starting at texel index
+/// `first`, which must lie inside the texture.
+#[inline]
+fn for_each_texel_alpha(view: &TexView<'_>, first: usize, count: usize, mut visit: impl FnMut(usize, u32)) {
+    match view.psm {
+        spec::psm::PSM_8888 => {
+            let texels = &view.pixels[first * 4..(first + count) * 4];
+            for (offset, texel) in texels.chunks_exact(4).enumerate() {
+                visit(offset, texel[3] as u32);
+            }
+        }
+        spec::psm::PSM_4444 => {
+            let texels = &view.pixels[first * 2..(first + count) * 2];
+            for (offset, texel) in texels.chunks_exact(2).enumerate() {
+                visit(offset, ((u16::from_le_bytes([texel[0], texel[1]]) >> 12) as u32) * 17);
+            }
+        }
+        spec::psm::PSM_T8 => {
+            let palette = view.palette.unwrap();
+            for (offset, &index) in view.pixels[first..first + count].iter().enumerate() {
+                visit(offset, palette[index as usize * 4 + 3] as u32);
+            }
+        }
+        _ => (0..count).for_each(|offset| visit(offset, 0)),
     }
 }
 
@@ -1182,27 +1846,6 @@ fn texel_alpha(view: &TexView<'_>, x: i32, y: i32) -> u32 {
     }
 }
 
-fn sample_alpha(view: &TexView<'_>, u: f32, v: f32) -> u8 {
-    if !view.linear {
-        return texel_alpha(view, (u * view.w as f32) as i32, (v * view.h as f32) as i32) as u8;
-    }
-    let Some(sample) = linear_sample_coordinates(view.w, view.h, u, v) else {
-        return 0;
-    };
-    let lerp = |a: u32, b: u32, f: u32| (a * (256 - f) + b * f) >> 8;
-    let top = lerp(
-        texel_alpha(view, sample.x0 as i32, sample.y0 as i32),
-        texel_alpha(view, sample.x1 as i32, sample.y0 as i32),
-        sample.fx,
-    );
-    let bottom = lerp(
-        texel_alpha(view, sample.x0 as i32, sample.y1 as i32),
-        texel_alpha(view, sample.x1 as i32, sample.y1 as i32),
-        sample.fx,
-    );
-    lerp(top, bottom, sample.fy) as u8
-}
-
 #[allow(clippy::too_many_arguments)]
 fn alpha_quad_into_mask(
     view: &TexView<'_>,
@@ -1213,6 +1856,92 @@ fn alpha_quad_into_mask(
     mask: &mut [u8],
     stride: u32,
     global_alpha: u8,
+) {
+    for_each_quad_alpha(view, op, surface, clip, scale, stride, global_alpha, &mut |index: usize, alpha: u32| {
+        let target = &mut mask[index];
+        if *target == 0 {
+            *target = alpha as u8;
+        } else {
+            composite_mask(target, alpha as u8);
+        }
+    });
+}
+
+/// Receives the sampled, global-scaled alphas of one alpha TEX_QUAD.
+trait AlphaSink {
+    fn pixel(&mut self, index: usize, alpha: u32);
+
+    /// `count` pixels from buffer index `start` whose alphas are the texels
+    /// from texel index `first` on.
+    fn texels(&mut self, view: &TexView<'_>, start: usize, first: usize, count: usize, global_alpha: u8) {
+        for_each_texel_alpha(view, first, count, |offset, mut alpha| {
+            if global_alpha != 255 {
+                alpha = (alpha * global_alpha as u32 + 127) / 255;
+            }
+            self.pixel(start + offset, alpha);
+        });
+    }
+}
+
+impl<F: FnMut(usize, u32)> AlphaSink for F {
+    fn pixel(&mut self, index: usize, alpha: u32) {
+        self(index, alpha)
+    }
+}
+
+/// Blends a flat color through quad alphas straight into the target.
+struct BlendSink<'a> {
+    destination: &'a mut [u16],
+    color: [u32; 3],
+}
+
+impl AlphaSink for BlendSink<'_> {
+    fn pixel(&mut self, index: usize, alpha: u32) {
+        let [r, g, b] = self.color;
+        blend_rgb565_pixel(&mut self.destination[index], r, g, b, alpha);
+    }
+
+    fn texels(&mut self, view: &TexView<'_>, start: usize, first: usize, count: usize, global_alpha: u8) {
+        if view.psm != spec::psm::PSM_8888 {
+            for_each_texel_alpha(view, first, count, |offset, mut alpha| {
+                if global_alpha != 255 {
+                    alpha = (alpha * global_alpha as u32 + 127) / 255;
+                }
+                self.pixel(start + offset, alpha);
+            });
+            return;
+        }
+        // One texel per pixel of a row: walk both slices together.
+        let [r, g, b] = self.color;
+        let pixels = &mut self.destination[start..start + count];
+        let texels = &view.pixels[first * 4..(first + count) * 4];
+        let ga = global_alpha as u32;
+        for (pixel, texel) in pixels.iter_mut().zip(texels.chunks_exact(4)) {
+            let mut alpha = texel[3] as u32;
+            if alpha == 0 {
+                continue;
+            }
+            if ga != 255 {
+                alpha = (alpha * ga + 127) / 255;
+            }
+            blend_rgb565_pixel(pixel, r, g, b, alpha);
+        }
+    }
+}
+
+/// Visit every covered pixel of one alpha TEX_QUAD with its buffer index
+/// (row stride `stride`, origin at `surface`) and sampled, global-scaled
+/// alpha.
+#[allow(clippy::too_many_arguments)]
+fn for_each_quad_alpha(
+    view: &TexView<'_>,
+    op: &[u32],
+    surface: Clip,
+    clip: Clip,
+    scale: u32,
+    stride: u32,
+    global_alpha: u8,
+    sink: &mut impl AlphaSink,
 ) {
     let logical = logical_rect(op[2], op[3]).intersect(clip);
     if logical.is_empty() {
@@ -1226,20 +1955,185 @@ fn alpha_quad_into_mask(
     let v0 = f32::from_bits(op[5]);
     let u1 = f32::from_bits(op[6]);
     let v1 = f32::from_bits(op[7]);
-    for py in physical.y..physical.y + physical.h {
-        let v = v0 + (v1 - v0) * ((py as i32 - y * scale_i) as f32 + 0.5) / (h * scale_i) as f32;
-        for px in physical.x..physical.x + physical.w {
-            let u =
-                u0 + (u1 - u0) * ((px as i32 - x * scale_i) as f32 + 0.5) / (w * scale_i) as f32;
-            let alpha = (sample_alpha(view, u, v) as u32 * global_alpha as u32 + 127) / 255;
-            let local_x = px as i32 - surface.x0 * scale_i;
-            let local_y = py as i32 - surface.y0 * scale_i;
-            composite_mask(
-                &mut mask[local_y as usize * stride as usize + local_x as usize],
-                alpha as u8,
-            );
+    // Texture sampling is separable: texel columns depend on u alone and rows
+    // on v alone. Columns resolve once per chunk and rows once per row, so the
+    // inner loop only fetches texels.
+    const COLUMNS: usize = 32;
+    let mut columns = [LinearSample::default(); COLUMNS];
+    let end_x = physical.x + physical.w;
+    let mut chunk_x = physical.x;
+    // The core rasterizer's exact expressions, reciprocal included.
+    let inv_w = 1.0f32 / (w * scale_i) as f32;
+    let inv_h = 1.0f32 / (h * scale_i) as f32;
+    while chunk_x < end_x {
+        let count = ((end_x - chunk_x) as usize).min(COLUMNS);
+        for (column, px) in columns[..count].iter_mut().zip(chunk_x..) {
+            let u = u0 + (u1 - u0) * ((px as i32 - x * scale_i) as f32 + 0.5) * inv_w;
+            *column = sample_column(view, u);
         }
+        // Columns on consecutive in-range texels with zero weight read one
+        // texel per pixel: a quad drawn at its texture's own density.
+        let unit_columns = columns[..count].iter().all(|column| column.fx == 0)
+            && columns[..count].windows(2).all(|pair| pair[0].x0.checked_add(1) == Some(pair[1].x0))
+            && columns[0].x0 < view.w
+            && columns[count - 1].x0 < view.w;
+        for py in physical.y..physical.y + physical.h {
+            let v = v0 + (v1 - v0) * ((py as i32 - y * scale_i) as f32 + 0.5) * inv_h;
+            let row = sample_column(view, v);
+            let start = (py as i32 - surface.y0 * scale_i) as usize * stride as usize
+                + (chunk_x as i32 - surface.x0 * scale_i) as usize;
+            if unit_columns && row.fy == 0 && row.y0 < view.h {
+                let first = row.y0 as usize * view.w as usize + columns[0].x0 as usize;
+                sink.texels(view, start, first, count, global_alpha);
+                continue;
+            }
+            if view.linear {
+                // Clamped neighbors: every index lies inside the texture.
+                let rows = (row.y0 as usize * view.w as usize, row.y1 as usize * view.w as usize, row.fy);
+                let columns = &columns[..count];
+                let pixels = view.pixels;
+                match view.psm {
+                    spec::psm::PSM_8888 => {
+                        bilinear_row(|i| pixels[i * 4 + 3] as u32, columns, rows, global_alpha, start, sink)
+                    }
+                    spec::psm::PSM_4444 => bilinear_row(
+                        |i| ((u16::from_le_bytes([pixels[i * 2], pixels[i * 2 + 1]]) >> 12) as u32) * 17,
+                        columns,
+                        rows,
+                        global_alpha,
+                        start,
+                        sink,
+                    ),
+                    spec::psm::PSM_T8 => {
+                        let palette = view.palette.unwrap();
+                        bilinear_row(|i| palette[pixels[i] as usize * 4 + 3] as u32, columns, rows, global_alpha, start, sink)
+                    }
+                    _ => bilinear_row(|_| 0, columns, rows, global_alpha, start, sink),
+                }
+                continue;
+            }
+            for (offset, column) in columns[..count].iter().enumerate() {
+                let mut alpha = sample_separable(view, column, &row);
+                if global_alpha != 255 {
+                    alpha = (alpha * global_alpha as u32 + 127) / 255;
+                }
+                sink.pixel(start + offset, alpha);
+            }
+        }
+        chunk_x += count as u32;
     }
+}
+
+/// Visit every covered pixel of one TEX_QUAD with its buffer index (row
+/// stride `stride`, origin at `surface`) and its sampled RGBA: the core
+/// rasterizer's nearest or integer bilinear sample, resolved per column and
+/// per row.
+#[allow(clippy::too_many_arguments)]
+fn for_each_quad_texel(
+    view: &TexView<'_>,
+    op: &[u32],
+    surface: Clip,
+    clip: Clip,
+    scale: u32,
+    stride: u32,
+    mut visit: impl FnMut(usize, u32, u32, u32, u32),
+) {
+    let logical = logical_rect(op[2], op[3]).intersect(clip);
+    if logical.is_empty() || view.w == 0 || view.h == 0 {
+        return;
+    }
+    let (x, y) = xy(op[2]);
+    let (w, h) = wh(op[3]);
+    let scale_i = scale as i32;
+    let physical = physical_rect(logical, scale);
+    let (u0, v0) = (f32::from_bits(op[4]), f32::from_bits(op[5]));
+    let (u1, v1) = (f32::from_bits(op[6]), f32::from_bits(op[7]));
+    let inv_w = 1.0f32 / (w * scale_i) as f32;
+    let inv_h = 1.0f32 / (h * scale_i) as f32;
+    let tw = view.w as usize;
+    let (tw_max, th_max) = (view.w as i32 - 1, view.h as i32 - 1);
+    const COLUMNS: usize = 32;
+    let mut columns = [LinearSample::default(); COLUMNS];
+    let end_x = physical.x + physical.w;
+    let mut chunk_x = physical.x;
+    while chunk_x < end_x {
+        let count = ((end_x - chunk_x) as usize).min(COLUMNS);
+        for (column, px) in columns[..count].iter_mut().zip(chunk_x..) {
+            let u = u0 + (u1 - u0) * ((px as i32 - x * scale_i) as f32 + 0.5) * inv_w;
+            *column = if view.linear {
+                sample_column(view, u)
+            } else {
+                let tx = ((u * view.w as f32) as i32).clamp(0, tw_max);
+                LinearSample { x0: tx as u32, ..LinearSample::default() }
+            };
+        }
+        for py in physical.y..physical.y + physical.h {
+            let v = v0 + (v1 - v0) * ((py as i32 - y * scale_i) as f32 + 0.5) * inv_h;
+            let start = (py as i32 - surface.y0 * scale_i) as usize * stride as usize
+                + (chunk_x as i32 - surface.x0 * scale_i) as usize;
+            if !view.linear {
+                let ty = ((v * view.h as f32) as i32).clamp(0, th_max) as usize;
+                for (offset, column) in columns[..count].iter().enumerate() {
+                    let Some((r, g, b, a)) = texel(view, ty * tw + column.x0 as usize) else { return };
+                    visit(start + offset, r, g, b, a);
+                }
+                continue;
+            }
+            let row = sample_column(view, v);
+            let (top, bottom) = (row.y0 as usize * tw, row.y1 as usize * tw);
+            let lerp = |a: u32, b: u32, f: u32| (a * (256 - f) + b * f) >> 8;
+            for (offset, column) in columns[..count].iter().enumerate() {
+                let (x0, x1) = (column.x0 as usize, column.x1 as usize);
+                let (Some(c00), Some(c01), Some(c10), Some(c11)) =
+                    (texel(view, top + x0), texel(view, top + x1), texel(view, bottom + x0), texel(view, bottom + x1))
+                else {
+                    return;
+                };
+                let mix = |p: u32, q: u32, s: u32, t: u32| lerp(lerp(p, q, column.fx), lerp(s, t, column.fx), row.fy);
+                visit(start + offset, mix(c00.0, c01.0, c10.0, c11.0), mix(c00.1, c01.1, c10.1, c11.1),
+                    mix(c00.2, c01.2, c10.2, c11.2), mix(c00.3, c01.3, c10.3, c11.3));
+            }
+        }
+        chunk_x += count as u32;
+    }
+}
+
+/// One axis of a texture lookup at normalized `t`. Nearest sampling keeps the
+/// texel index (`x0` for u, `y0` for v); linear sampling keeps the core's
+/// clamped neighbors and 8-bit weight.
+fn sample_column(view: &TexView<'_>, t: f32) -> LinearSample {
+    if !view.linear {
+        let index = (t * view.w as f32) as i32;
+        return LinearSample { x0: index as u32, y0: (t * view.h as f32) as i32 as u32, ..LinearSample::default() };
+    }
+    linear_sample_coordinates(view.w, view.h, t, t).unwrap_or_default()
+}
+
+/// Texel alpha from a resolved column (x fields) and row (y fields): nearest
+/// fetches one texel, linear blends four with integer weights.
+fn sample_separable(view: &TexView<'_>, column: &LinearSample, row: &LinearSample) -> u32 {
+    if !view.linear {
+        return texel_alpha(view, column.x0 as i32, row.y0 as i32);
+    }
+    if view.w == 0 || view.h == 0 {
+        return 0;
+    }
+    if column.fx == 0 && row.fy == 0 {
+        // Zero weights select the base texel; a 1:1 quad samples texel centers.
+        return texel_alpha(view, column.x0 as i32, row.y0 as i32);
+    }
+    let lerp = |a: u32, b: u32, f: u32| (a * (256 - f) + b * f) >> 8;
+    let top = lerp(
+        texel_alpha(view, column.x0 as i32, row.y0 as i32),
+        texel_alpha(view, column.x1 as i32, row.y0 as i32),
+        column.fx,
+    );
+    let bottom = lerp(
+        texel_alpha(view, column.x0 as i32, row.y1 as i32),
+        texel_alpha(view, column.x1 as i32, row.y1 as i32),
+        column.fx,
+    );
+    lerp(top, bottom, row.fy)
 }
 
 #[cfg(test)]
@@ -1398,14 +2292,17 @@ mod tests {
         w as u32 | ((h as u32) << 16)
     }
 
+    /// Routes every translucent op to the PPA so tests can inspect it.
     fn renderer() -> Renderer {
-        Renderer::new(RendererConfig {
+        let mut renderer = Renderer::new(RendererConfig {
             scale: 1,
             min_fill_pixels: 1,
             min_blend_pixels: 1,
             min_srm_pixels: 1,
         })
-        .unwrap()
+        .unwrap();
+        renderer.cpu_blend_max_pixels = 0;
+        renderer
     }
 
     #[test]
@@ -1925,9 +2822,9 @@ mod tests {
             .render(&ui, &words, &mut output, 8, 8, &mut ppa)
             .unwrap();
 
-        assert_eq!(stats.ppa_fills, 2, "clear plus the red rectangle");
+        assert_eq!(stats.ppa_fills, 1, "the full-screen red rectangle hides the clear");
         assert_eq!(stats.software_ops, 1);
-        assert_eq!(ppa.fills, 2);
+        assert_eq!(ppa.fills, 1);
         assert_eq!(output[0], pack_rgb565(255, 0, 0));
         assert_ne!(output[2 * 8 + 2], output[2 * 8 + 5]);
     }
@@ -2006,7 +2903,7 @@ mod tests {
     }
 
     #[test]
-    fn linear_transparent_color_uses_software_fallback() {
+    fn linear_transparent_color_samples_its_colors_on_the_cpu() {
         let mut ui = Ui::new();
         ui.set_viewport(4.0, 1.0);
         let handle = ui.upload_texture_flags(
@@ -2038,8 +2935,10 @@ mod tests {
             .render(&ui, &words, &mut output, 4, 1, &mut ppa)
             .unwrap();
 
+        // Transparent black texels darken the bilinear edge, so the quad is
+        // not an alpha mask; the CPU samples its colors like the core does.
         assert_eq!(stats.ppa_blends, 0);
-        assert_eq!(stats.software_ops, 1);
+        assert_eq!(stats.software_ops, 0);
         assert_eq!(ppa.blends, 0);
         assert_eq!(output, expected);
     }
@@ -2107,6 +3006,64 @@ mod tests {
         assert_eq!(ppa.blends, 1);
         assert_eq!(ppa.last_global_alpha, 255);
         assert_eq!(ppa.last_mask_max, 192);
+    }
+
+    #[test]
+    fn glyph_masks_at_atlas_density_match_sampled_compositing() {
+        let coverage: [u8; 16] = [
+            0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 255,
+        ];
+        let mut font = Vec::new();
+        font.extend_from_slice(&spec::font_atlas::MAGIC.to_le_bytes());
+        font.extend_from_slice(&spec::font_atlas::VERSION.to_le_bytes());
+        font.extend_from_slice(&1u16.to_le_bytes());
+        font.extend_from_slice(&[2, 2, 2, 2, 0, 0, 2, 0]);
+        font.extend_from_slice(&65u32.to_le_bytes());
+        font.extend_from_slice(&0u16.to_le_bytes());
+        font.extend_from_slice(&[2, 0]);
+        font.extend_from_slice(&coverage);
+        let mut ui = Ui::new_with_raster_density(2);
+        ui.set_viewport(6.0, 4.0);
+        assert!(ui.load_font_atlas(&font));
+        // Overlapping cells exercise compositing into a non-empty mask.
+        let glyphs = [(1, 1), (2, 1)];
+        for alpha in [128u32, 255] {
+            let words = [
+                spec::draw_op::GLYPH_RUN,
+                2 << 16,
+                (alpha << 24) | 0x00ff_ffff,
+                xy_word(glyphs[0].0, glyphs[0].1),
+                0,
+                xy_word(glyphs[1].0, glyphs[1].1),
+                0,
+            ];
+            let mut output = vec![0u16; 12 * 8];
+            let mut ppa = MockPpa::default();
+            let mut renderer = Renderer::new(RendererConfig {
+                scale: 2,
+                min_fill_pixels: 1,
+                min_blend_pixels: 1,
+                min_srm_pixels: 1,
+            })
+            .unwrap();
+            renderer.cpu_blend_max_pixels = 0;
+            renderer.render(&ui, &words, &mut output, 12, 8, &mut ppa).unwrap();
+
+            let mut expected = vec![0u8; 12 * 8];
+            for (gx, gy) in glyphs {
+                let (gx, gy) = (gx as i32 * 2, gy as i32 * 2);
+                for py in gy..gy + 4 {
+                    for px in gx..gx + 4 {
+                        let sx = coverage_index(px - gx, 2, 2, 4);
+                        let sy = coverage_index(py - gy, 2, 2, 4);
+                        let value = (coverage[sy * 4 + sx] as u32 * alpha + 127) / 255;
+                        composite_mask(&mut expected[(py * 12 + px) as usize], value as u8);
+                    }
+                }
+            }
+            assert_eq!(ppa.blends, 1);
+            assert_eq!(ppa.last_mask, expected);
+        }
     }
 
     #[test]

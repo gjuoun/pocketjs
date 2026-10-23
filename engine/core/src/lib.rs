@@ -293,6 +293,8 @@ pub struct Ui {
     /// coordinates always remain logical; only core-owned bitmap resources
     /// (currently rounded-corner masks) use this density.
     raster_density: u32,
+    /// See [`Ui::set_stable_motion_paint`].
+    stable_motion_paint: bool,
     /// Changes whenever raster-visible resource bytes or tables change.
     raster_revision: u64,
     focused: i32,
@@ -378,6 +380,7 @@ impl Ui {
             tex_free: Vec::new(),
             paint_cache: draw::PaintCache::new(),
             raster_density,
+            stable_motion_paint: false,
             raster_revision: 1,
             focused: 0,
             draw_list: DrawList::new(),
@@ -401,6 +404,17 @@ impl Ui {
     /// Raster pixels per logical UI pixel for core-owned bitmap resources.
     pub fn raster_density(&self) -> u32 {
         self.raster_density
+    }
+
+    /// Paint that repeats exactly when content moves by whole logical pixels
+    /// (see `DrawList::stable_motion_paint`): translations round to whole
+    /// pixels for drawing and hit testing, and partially clipped gradients
+    /// keep their unclipped geometry inside a SCISSOR. Damage tracking can
+    /// then move the pixels of sliding content. Only for backends that clip
+    /// in software: coordinates may leave the viewport, which the PSP GE
+    /// cannot draw.
+    pub fn set_stable_motion_paint(&mut self, enabled: bool) {
+        self.stable_motion_paint = enabled;
     }
 
     /// Declare how many `tick()` calls make one second of virtual time
@@ -1483,7 +1497,7 @@ impl Ui {
         if self.layout.needs() {
             layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
         }
-        draw::hit_test(&self.tree, &self.styles, self.layout.viewport, x, y)
+        draw::hit_point(&self.tree, &self.styles, spec::ROOT_ID, self.layout.viewport, x, y, true, self.stable_motion_paint)
     }
 
     /// `hit_test`'s bounds-only twin (spec op hitTestBounds): pure layout
@@ -1493,7 +1507,7 @@ impl Ui {
         if self.layout.needs() {
             layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
         }
-        draw::hit_test_bounds(&self.tree, &self.styles, self.layout.viewport, x, y)
+        draw::hit_point(&self.tree, &self.styles, spec::ROOT_ID, self.layout.viewport, x, y, false, self.stable_motion_paint)
     }
 
     pub fn hit_test_auxiliary(&mut self, x: f32, y: f32) -> i32 {
@@ -1507,13 +1521,15 @@ impl Ui {
                 auxiliary.root,
             );
         }
-        draw::hit_test_root(
+        draw::hit_point(
             &self.tree,
             &self.styles,
             auxiliary.root,
             auxiliary.layout.viewport,
             x,
             y,
+            true,
+            self.stable_motion_paint,
         )
     }
 
@@ -1528,13 +1544,15 @@ impl Ui {
                 auxiliary.root,
             );
         }
-        draw::hit_test_bounds_root(
+        draw::hit_point(
             &self.tree,
             &self.styles,
             auxiliary.root,
             auxiliary.layout.viewport,
             x,
             y,
+            false,
+            self.stable_motion_paint,
         )
     }
 
@@ -1549,10 +1567,11 @@ impl Ui {
             layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
         }
         let screen = self.layout.viewport;
+        let snap = self.stable_motion_paint;
         let tree = &self.tree;
         let styles = &self.styles;
         self.touch_table.resolve(packed, out, |x, y| {
-            draw::hit_test_bounds(tree, styles, screen, x, y)
+            draw::hit_point(tree, styles, spec::ROOT_ID, screen, x, y, false, snap)
         })
     }
 
@@ -1569,10 +1588,11 @@ impl Ui {
         }
         let root = auxiliary.root;
         let screen = auxiliary.layout.viewport;
+        let snap = self.stable_motion_paint;
         let tree = &self.tree;
         let styles = &self.styles;
         auxiliary.touch_table.resolve(packed, out, |x, y| {
-            draw::hit_test_bounds_root(tree, styles, root, screen, x, y)
+            draw::hit_point(tree, styles, root, screen, x, y, false, snap)
         })
     }
 
@@ -1887,6 +1907,7 @@ impl Ui {
     /// Walk the tree into the DrawList (spec.ts DRAWLIST format) and return
     /// it. Output is valid until the next mutating call.
     pub fn draw(&mut self) -> &DrawList {
+        self.draw_list.stable_motion_paint = self.stable_motion_paint;
         self.fonts.stream_begin(self.frame);
         if self.layout.needs() {
             layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
@@ -1992,6 +2013,7 @@ impl Ui {
                 auxiliary.root,
             );
         }
+        auxiliary.draw_list.stable_motion_paint = self.stable_motion_paint;
         let (target, drawn, provider_stale) = draw::build_root(
             &self.tree,
             &self.styles,

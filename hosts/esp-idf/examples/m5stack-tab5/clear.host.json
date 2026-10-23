@@ -4,7 +4,7 @@
   "id": "tab5-clear",
   "platform": "esp-idf",
   "form": "takeover",
-  "tickHz": 60,
+  "tickHz": 30,
   "display": {
     "physicalViewport": [720, 1280],
     "logicalViewports": [[360, 640]],

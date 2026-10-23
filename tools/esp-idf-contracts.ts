@@ -21,7 +21,7 @@ function cType(type: string): string {
 function array(type: string) { return type.match(/^\[(\w+); (\d+|MAX_DAMAGE_REGIONS)\]$/); }
 function layout(type: string, pointer: number): { size: number; align: number; offsets?: number[] } {
   if (type.startsWith("*") || type.startsWith("Option<") || type === "usize") return { size: pointer, align: pointer };
-  const scalar = { u64: 8, u32: 4, u16: 2, u8: 1, bool: 1 }[type];
+  const scalar = { u64: 8, u32: 4, i32: 4, u16: 2, u8: 1, bool: 1 }[type];
   if (scalar) return { size: scalar, align: scalar };
   const a = array(type);
   if (a) { const element = layout(a[1], pointer); return { ...element, size: element.size * (a[2] === "MAX_DAMAGE_REGIONS" ? 8 : Number(a[2])) }; }

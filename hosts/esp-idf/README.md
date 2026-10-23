@@ -49,10 +49,15 @@ runner. Neither example initializes a panel or reads a device input driver.
 `examples/m5stack-tab5` is complete firmware for the M5Stack Tab5. It drives
 the MIPI-DSI panel and touch controller through the
 `espressif/m5stack_tab5_noglib` BSP, renders RGB565 strips, and presents them
-through the PPA. A landscape app is turned 90 degrees onto the portrait panel.
+through a GDMA channel (full-width portrait strips) or the PPA. A landscape app
+is turned 90 degrees onto the portrait panel.
 **The firmware embeds `apps/hero` at 640×360 @2x by default;
 `-DPOCKETJS_TAB5_APP=clear` embeds `apps/clear` at 360×640 @2x.** Both fill
 the 720×1280 panel; each app's `pocket.tab5.json` declares that viewport.
+Clear ticks at 30 Hz. Each core renders strips with its own renderer. When a
+frame's plan carries a motion, a GDMA channel moves the retained framebuffer
+rows while the first core renders the rest of the damage, and strips present
+after the move.
 
 ```sh
 cd hosts/esp-idf/examples/m5stack-tab5

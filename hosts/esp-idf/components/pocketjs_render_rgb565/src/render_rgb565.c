@@ -49,6 +49,17 @@ esp_err_t pocketjs_rgb565_prepare(pocketjs_rgb565_renderer_t *renderer,
              : ESP_ERR_INVALID_STATE;
 }
 
+esp_err_t pocketjs_rgb565_prepare_motion(pocketjs_rgb565_renderer_t *renderer,
+                                         pocketjs_rgb565_target_t *target,
+                                         const pocketjs_ui_frame_view_t *frame,
+                                         pocketjs_rgb565_damage_plan_t *out_plan,
+                                         pocketjs_rgb565_motion_t *out_motion) {
+  return pocketjs_native_renderer_prepare_motion(renderer, target, frame,
+                                                 out_plan, out_motion) == 0
+             ? ESP_OK
+             : ESP_ERR_INVALID_STATE;
+}
+
 esp_err_t
 pocketjs_rgb565_render_strip(pocketjs_rgb565_renderer_t *renderer,
                              const pocketjs_ui_frame_view_t *frame,

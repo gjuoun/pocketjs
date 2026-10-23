@@ -299,6 +299,38 @@ export const IDF_NATIVE_STRUCTS = [
     ]
   },
   {
+    "name": "NativeMotion",
+    "cName": "pocketjs_rgb565_motion_t",
+    "component": "renderer",
+    "fields": [
+      {
+        "name": "struct_size",
+        "cName": "struct_size",
+        "type": "usize"
+      },
+      {
+        "name": "present",
+        "cName": "present",
+        "type": "bool"
+      },
+      {
+        "name": "destination",
+        "cName": "destination",
+        "type": "NativeRect"
+      },
+      {
+        "name": "dx",
+        "cName": "dx",
+        "type": "i32"
+      },
+      {
+        "name": "dy",
+        "cName": "dy",
+        "type": "i32"
+      }
+    ]
+  },
+  {
     "name": "NativeRenderStats",
     "cName": "pocketjs_rgb565_render_stats_t",
     "component": "renderer",

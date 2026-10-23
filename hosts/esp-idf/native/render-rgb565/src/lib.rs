@@ -11,7 +11,8 @@ use pocketjs_core::{
 };
 use pocketjs_idf_abi::*;
 use pocketjs_render_rgb565::{
-    PpaOps, QuarterTurn, Rect, RenderTargetState, Renderer, RendererConfig, SrmTransform,
+    PpaOps, QuarterTurn, Rect, RenderDamagePlan, RenderTargetState, Renderer, RendererConfig,
+    SrmTransform,
 };
 
 pub struct NativeRenderer {
@@ -23,6 +24,8 @@ pub struct NativeRenderTarget {
     prepared_epoch: u64,
     prepared_core: *mut c_void,
     prepared: bool,
+    /// The prepare that set `prepared` also kept the list for its commit.
+    prepared_motion: bool,
 }
 
 struct CAccelerator<'a> {
@@ -142,6 +145,24 @@ fn native_rect(value: Rect) -> NativeRect {
         y: value.y,
         width: value.w,
         height: value.h,
+    }
+}
+
+fn write_plan(output: &mut NativeDamagePlan, plan: &RenderDamagePlan) {
+    let output_size = output.struct_size;
+    *output = NativeDamagePlan {
+        struct_size: output_size,
+        region_count: plan.region_count() as u32,
+        full_redraw: plan.is_full_redraw(),
+        regions: [NativeRect::default(); MAX_DAMAGE_REGIONS],
+    };
+    for (index, region) in plan.regions().iter().enumerate() {
+        output.regions[index] = NativeRect {
+            x: region.x0.max(0) as u32,
+            y: region.y0.max(0) as u32,
+            width: region.x1.saturating_sub(region.x0) as u32,
+            height: region.y1.saturating_sub(region.y0) as u32,
+        };
     }
 }
 
@@ -290,6 +311,7 @@ pub unsafe extern "C" fn pocketjs_native_render_target_create(
         prepared_epoch: 0,
         prepared_core: ptr::null_mut(),
         prepared: false,
+        prepared_motion: false,
     }));
     0
 }
@@ -337,24 +359,71 @@ pub unsafe extern "C" fn pocketjs_native_renderer_prepare(
     else {
         return -1;
     };
-    let output_size = output.struct_size;
-    *output = NativeDamagePlan {
-        struct_size: output_size,
-        region_count: plan.region_count() as u32,
-        full_redraw: plan.is_full_redraw(),
-        regions: [NativeRect::default(); MAX_DAMAGE_REGIONS],
+    write_plan(output, &plan);
+    target.prepared_epoch = (*frame).epoch;
+    target.prepared_core = (*frame).private_core;
+    target.prepared = true;
+    target.prepared_motion = false;
+    0
+}
+
+/// [`pocketjs_native_renderer_prepare`] that may also report retained pixels
+/// to move before the plan's regions are repainted.
+#[no_mangle]
+pub unsafe extern "C" fn pocketjs_native_renderer_prepare_motion(
+    renderer: *mut NativeRenderer,
+    target: *mut NativeRenderTarget,
+    frame: *const NativeFrameView,
+    output: *mut NativeDamagePlan,
+    motion: *mut NativeMotion,
+) -> i32 {
+    let (Some(renderer), Some(target), Some(output), Some(motion)) =
+        (renderer.as_mut(), target.as_mut(), output.as_mut(), motion.as_mut())
+    else {
+        return -1;
     };
-    for (index, region) in plan.regions().iter().enumerate() {
-        output.regions[index] = NativeRect {
-            x: region.x0.max(0) as u32,
-            y: region.y0.max(0) as u32,
-            width: region.x1.saturating_sub(region.x0) as u32,
-            height: region.y1.saturating_sub(region.y0) as u32,
+    target.prepared = false;
+    if output.struct_size < core::mem::size_of::<NativeDamagePlan>()
+        || motion.struct_size < core::mem::size_of::<NativeMotion>()
+    {
+        return -1;
+    }
+    let Some((core, words)) = frame_parts(frame) else {
+        return -1;
+    };
+    if renderer.renderer.config().scale != (*frame).raster_density {
+        return -1;
+    }
+    let Some(plan) = renderer
+        .renderer
+        .prepare_damage_with_motion(&mut target.state, &core, words)
+    else {
+        return -1;
+    };
+    write_plan(output, &plan);
+    let motion_size = motion.struct_size;
+    *motion = NativeMotion {
+        struct_size: motion_size,
+        present: false,
+        destination: NativeRect::default(),
+        dx: 0,
+        dy: 0,
+    };
+    if let Some(moved) = plan.motion() {
+        motion.present = true;
+        motion.destination = NativeRect {
+            x: moved.destination.x0 as u32,
+            y: moved.destination.y0 as u32,
+            width: (moved.destination.x1 - moved.destination.x0) as u32,
+            height: (moved.destination.y1 - moved.destination.y0) as u32,
         };
+        motion.dx = moved.dx;
+        motion.dy = moved.dy;
     }
     target.prepared_epoch = (*frame).epoch;
     target.prepared_core = (*frame).private_core;
     target.prepared = true;
+    target.prepared_motion = true;
     0
 }
 
@@ -385,7 +454,9 @@ pub unsafe extern "C" fn pocketjs_native_renderer_render_strip(
         .as_ref()
         .filter(|value| value.struct_size >= core::mem::size_of::<NativeAccelerator>());
     let mut accelerator = CAccelerator { value: accelerator };
-    let Some(stats) = renderer.renderer.render_strip(
+    // The epoch changes with every draw, so it keys the per-frame op index.
+    let Some(stats) = renderer.renderer.render_strip_indexed(
+        (*frame).epoch,
         &core,
         words,
         destination,
@@ -421,9 +492,11 @@ pub unsafe extern "C" fn pocketjs_native_renderer_commit(
         target.prepared = false;
         return -1;
     }
-    let committed = renderer
-        .renderer
-        .commit_damage(&mut target.state, &core, words);
+    // The epoch and core identify the prepared frame, so a motion prepare's
+    // copy of its words is the committed list.
+    let committed = (target.prepared_motion
+        && renderer.renderer.commit_prepared_damage(&mut target.state, &core))
+        || renderer.renderer.commit_damage(&mut target.state, &core, words);
     target.prepared = false;
     committed as i32
 }

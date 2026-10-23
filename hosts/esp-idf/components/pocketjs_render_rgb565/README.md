@@ -12,3 +12,10 @@ successful presentation or `abort` after a partial update. The caller owns
 every pixel buffer and all presentation synchronization. The renderer config's
 `scale` must equal the frame's raster density. A strip is full-width, but
 columns outside the damage rectangle are not modified.
+
+`prepare_motion` replaces `prepare` for a host that can move pixels inside its
+framebuffer. When `out_motion->present` is set, copy the pixels of
+`destination` offset by `(-dx, -dy)` into `destination` before presenting any
+strip; coordinates are logical, so multiply them by the raster density. Source
+and destination may overlap. Renderers of one frame may render strips on
+different tasks at the same time.

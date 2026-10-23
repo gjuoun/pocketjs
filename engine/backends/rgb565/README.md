@@ -58,6 +58,40 @@ split planning from history updates:
 
 This keeps framebuffer history transactional when a display transfer fails and
 lets two reusable strips overlap CPU rendering with asynchronous presentation.
+`render_strip_indexed` takes a frame key: the first strip of a DrawList indexes
+the rows each op reaches, and later strips of that list skip the ops outside
+their band. Distinct `Renderer`s may render strips of one frame on different
+cores.
+
+Inside a region, an opaque RECT or GRAD_RECT hides what earlier ops paint under
+it. **Translucent rects and gradients blend the parts that later opaque rects
+leave visible, and texture quads and glyph runs those rects cover are
+skipped.** Opaque fills are not split.
+
+## Motion reuse
+
+`prepare_damage_with_motion` may return a `DamageMotion`: a destination
+rectangle whose pixels equal the previous frame's pixels offset by `(dx, dy)`.
+The host moves those pixels inside the target, then renders the plan's
+regions, which exclude the destination. `render_incremental_with_motion` does
+both with `move_pixels`, a CPU copy; a host with a DMA engine moves the pixels
+itself. After a motion prepare, `commit_prepared_damage` records the list
+copied at prepare time for a caller that rendered that same list.
+
+The core plans motion from the two DrawLists alone: operations pair in painter
+order, and an operation either stays, moves by an offset, or changes. A moved
+rectangle must lie under an opaque op that moved, and every later op over it
+must have moved with it or be a flat RECT of the same color. **A plan that
+moves pixels is never promoted to a full redraw.** Enable
+`Ui::set_stable_motion_paint` so moved content paints the same pixels: world
+translations round to whole logical pixels, and a gradient cut by a clip keeps
+its unclipped geometry inside a SCISSOR.
+
+Texture quads that sample one texel per pixel, and alpha masks with any
+modulate color, blend on the CPU in one pass per row. Color textures that are
+not white alpha masks sample, modulate and blend with the core rasterizer's
+integer arithmetic, so CPU output matches `pocketjs_core::raster` byte for
+byte.
 
 ## Test
 

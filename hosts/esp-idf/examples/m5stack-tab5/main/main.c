@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <inttypes.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -7,6 +8,7 @@
 #include "bsp/display.h"
 #include "bsp/touch.h"
 #include "driver/ppa.h"
+#include "esp_async_memcpy.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_mipi_dsi.h"
@@ -15,6 +17,8 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "pocketjs/esp32p4_ppa.h"
 #include "pocketjs/guest.h"
@@ -27,20 +31,64 @@
 
 static const char *TAG = "pocketjs_tab5";
 
-/* Logical rows per rendered strip. */
-#define TAB5_STRIP_ROWS 24U
+/* Bytes per strip: 24 logical rows of the portrait panel at density 2. */
+#define TAB5_STRIP_BYTES (720U * 48U * sizeof(uint16_t))
+/* Upper bound of strips in one frame: eight damage regions of up to 32
+ * strips each (640 portrait rows / 24, 360 landscape rows / 13). */
+#define TAB5_MAX_STRIPS (8U * 32U)
+/* Copies queued at once on the mover's DMA channel, and panel rows per
+ * copy: each copy allocates DMA descriptors for its bytes in internal RAM. */
+#define TAB5_MOVE_BACKLOG 8U
+#define TAB5_MOVE_ROWS 48U
+/* Panel rows a move down must reach to copy rows in place: shorter moves
+ * would need one copy per few rows and bounce through strips instead. */
+#define TAB5_MIN_DIRECT_ROWS 32U
+/* Event bit set once the frame's motion has moved its pixels. */
+#define TAB5_MOVED_BIT BIT0
+
+/* Each core runs one lane with its own renderer and PPA clients. One strip
+ * renders while the other is presented; `idle` is given when a strip's
+ * presentation completes. */
+typedef struct {
+  pocketjs_rgb565_renderer_t *renderer;
+  const pocketjs_rgb565_accelerator_t *accelerator;
+  ppa_client_handle_t present;
+  async_memcpy_handle_t copy;
+  uint16_t *strips[2];
+  SemaphoreHandle_t idle[2];
+  uint32_t next_strip;
+  esp_err_t result;
+} tab5_lane_t;
 
 typedef struct {
   esp_lcd_touch_handle_t touch;
-  pocketjs_rgb565_renderer_t *renderer;
   pocketjs_rgb565_target_t *target;
-  const pocketjs_rgb565_accelerator_t *accelerator;
-  ppa_client_handle_t present;
   uint16_t *framebuffer;
-  uint16_t *strip;
+  tab5_lane_t lanes[2];
+  /* Strips of the frame being drawn; both lanes claim them in order. */
+  const pocketjs_ui_frame_view_t *frame;
+  pocketjs_rgb565_rect_t strips[TAB5_MAX_STRIPS];
+  uint32_t strip_count;
+  atomic_uint next_strip;
+  uint32_t strip_rows;
+  TaskHandle_t helper;
+  TaskHandle_t runner;
+  /* Moves retained framebuffer pixels when a plan carries a motion: whole
+   * rows through DMA channels, blocks through a PPA client. The helper moves
+   * while the first lane renders; strips present after `TAB5_MOVED_BIT`. */
+  ppa_client_handle_t mover;
+  async_memcpy_handle_t mover_copy;
+  SemaphoreHandle_t moved;
+  SemaphoreHandle_t written;
+  EventGroupHandle_t move_state;
+  pocketjs_rgb565_motion_t motion;
+  esp_err_t move_result;
   /* Landscape pictures turn 90 degrees counter-clockwise onto the 720x1280
    * portrait panel; portrait pictures keep their orientation. */
   bool landscape;
+  /* Panel pixels per raster pixel: 1 when the raster density fills the
+   * panel, 2 for an integer-fit picture rendered at half the density. */
+  uint32_t scale;
   int64_t frame_started;
   uint64_t frame_us;
   uint32_t frame_max_us;
@@ -68,27 +116,214 @@ static esp_err_t sample_input(pocketjs_ui_input_t *input, void *user_data) {
       continue;
     touches[input->touch_count++] = (pocketjs_ui_touch_t){
         .id = points[index].track_id,
-        .x = x / contract->raster_density,
-        .y = y / contract->raster_density,
+        .x = x * contract->logical_width / contract->physical_width,
+        .y = y * contract->logical_height / contract->physical_height,
     };
   }
   input->touches = touches;
   return ESP_OK;
 }
 
-static esp_err_t present_strip(tab5_host_t *host,
+static bool strip_presented(SemaphoreHandle_t idle) {
+  BaseType_t woken = pdFALSE;
+  xSemaphoreGiveFromISR(idle, &woken);
+  return woken == pdTRUE;
+}
+
+static bool on_copy_done(async_memcpy_handle_t copy,
+                         async_memcpy_event_t *event, void *user_data) {
+  return strip_presented(user_data);
+}
+
+static bool on_srm_done(ppa_client_handle_t client, ppa_event_data_t *event,
+                        void *user_data) {
+  return strip_presented(user_data);
+}
+
+static bool on_move_copied(async_memcpy_handle_t copy,
+                           async_memcpy_event_t *event, void *user_data) {
+  return strip_presented(user_data);
+}
+
+/* Move full panel rows y0..y1 by dy in place. Copies run in queue order: a
+ * move up copies top-down, every write landing on rows already read; a move
+ * down copies bottom-up in chunks no taller than dy, so no chunk overwrites
+ * a row not yet read. */
+static esp_err_t copy_rows(tab5_host_t *host, uint32_t y0, uint32_t y1,
+                           int32_t dy) {
+  const size_t row_bytes = BSP_LCD_H_RES * sizeof(uint16_t);
+  const uint32_t chunk =
+      dy > 0 && (uint32_t)dy < TAB5_MOVE_ROWS ? (uint32_t)dy : TAB5_MOVE_ROWS;
+  uint16_t *framebuffer = host->framebuffer;
+  esp_err_t result = ESP_OK;
+  uint32_t queued = 0;
+  for (uint32_t done = 0; done < y1 - y0 && result == ESP_OK;) {
+    const uint32_t rows = y1 - y0 - done < chunk ? y1 - y0 - done : chunk;
+    const uint32_t y = dy > 0 ? y1 - done - rows : y0 + done;
+    if (queued == TAB5_MOVE_BACKLOG) {
+      xSemaphoreTake(host->moved, portMAX_DELAY);
+      --queued;
+    }
+    result = esp_async_memcpy(host->mover_copy,
+                              framebuffer + (size_t)y * BSP_LCD_H_RES,
+                              framebuffer + (size_t)(y - dy) * BSP_LCD_H_RES,
+                              rows * row_bytes, on_move_copied, host->moved);
+    if (result == ESP_OK)
+      ++queued;
+    done += rows;
+  }
+  for (; queued > 0U; --queued)
+    xSemaphoreTake(host->moved, portMAX_DELAY);
+  return result;
+}
+
+/* Move full panel rows y0..y1 down by a short dy > 0, bottom-up in bands.
+ * A band's source overlaps no band written before it, so each band is read
+ * into one of the helper lane's strips and then written. The mover's
+ * channel reads the next band while the lane's channel writes this one. */
+static esp_err_t copy_rows_down(tab5_host_t *host, uint32_t y0, uint32_t y1,
+                                uint32_t dy) {
+  const size_t row_bytes = BSP_LCD_H_RES * sizeof(uint16_t);
+  uint16_t *framebuffer = host->framebuffer;
+  async_memcpy_handle_t writer = host->lanes[1].copy;
+  const uint32_t band_rows = TAB5_STRIP_BYTES / row_bytes;
+  const uint32_t count = (y1 - y0 + band_rows - 1U) / band_rows;
+  uint32_t reads = 0;
+  uint32_t writes = 0;
+  esp_err_t result = ESP_OK;
+  for (uint32_t band = 0; band < count && result == ESP_OK; ++band) {
+    const uint32_t top =
+        y1 > (band + 1U) * band_rows + y0 ? y1 - (band + 1U) * band_rows : y0;
+    const uint32_t rows = y1 - band * band_rows - top;
+    uint16_t *strip = host->lanes[1].strips[band & 1U];
+    /* The strip is free once the band two before it was written. */
+    for (; writes + 2U <= band; ++writes)
+      xSemaphoreTake(host->written, portMAX_DELAY);
+    result = esp_async_memcpy(host->mover_copy, strip,
+                              framebuffer + (size_t)(top - dy) * BSP_LCD_H_RES,
+                              rows * row_bytes, on_move_copied, host->moved);
+    if (result != ESP_OK)
+      break;
+    ++reads;
+    xSemaphoreTake(host->moved, portMAX_DELAY);
+    result = esp_async_memcpy(writer, framebuffer + (size_t)top * BSP_LCD_H_RES,
+                              strip, rows * row_bytes, on_move_copied,
+                              host->written);
+    if (result != ESP_OK)
+      break;
+  }
+  for (; writes < reads; ++writes)
+    xSemaphoreTake(host->written, portMAX_DELAY);
+  return result;
+}
+
+/* Synchronous 2D copy between the framebuffer and a strip-sized buffer. */
+static esp_err_t copy_block(tab5_host_t *host, void *to, uint32_t to_width,
+                            uint32_t to_x, uint32_t to_y, const void *from,
+                            uint32_t from_width, uint32_t from_x,
+                            uint32_t from_y, uint32_t w, uint32_t h,
+                            size_t to_bytes, uint32_t to_height,
+                            uint32_t from_height) {
+  const ppa_srm_oper_config_t operation = {
+      .in = {.buffer = from, .pic_w = from_width, .pic_h = from_height,
+             .block_w = w, .block_h = h, .block_offset_x = from_x,
+             .block_offset_y = from_y, .srm_cm = PPA_SRM_COLOR_MODE_RGB565},
+      .out = {.buffer = to, .buffer_size = to_bytes, .pic_w = to_width,
+              .pic_h = to_height, .block_offset_x = to_x,
+              .block_offset_y = to_y, .srm_cm = PPA_SRM_COLOR_MODE_RGB565},
+      .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
+      .scale_x = 1.0f,
+      .scale_y = 1.0f,
+      .mode = PPA_TRANS_MODE_BLOCKING,
+  };
+  return ppa_do_scale_rotate_mirror(host->mover, &operation);
+}
+
+/* Move a motion's pixels inside the panel framebuffer before any strip is
+ * presented. Full-width vertical moves go through the DMA channels. Other
+ * moves bounce bands through a strip of the helper's lane, which is idle
+ * while it moves, with the PPA, reading a band before writing it, in the
+ * order that keeps unread source rows. */
+static esp_err_t move_pixels(tab5_host_t *host,
+                             const pocketjs_ui_frame_view_t *frame,
+                             const pocketjs_rgb565_motion_t *motion) {
+  const uint32_t unit = frame->raster_density * host->scale;
+  const uint32_t picture_width = frame->logical_width * unit;
+  uint32_t x0 = motion->destination.x * unit;
+  uint32_t y0 = motion->destination.y * unit;
+  uint32_t x1 = x0 + motion->destination.width * unit;
+  uint32_t y1 = y0 + motion->destination.height * unit;
+  int32_t dx = motion->dx * (int32_t)unit;
+  int32_t dy = motion->dy * (int32_t)unit;
+  if (host->landscape) {
+    /* Picture (x, y) is panel (y, width - 1 - x). */
+    const uint32_t px0 = y0, px1 = y1;
+    y0 = picture_width - x1;
+    y1 = picture_width - x0;
+    x0 = px0;
+    x1 = px1;
+    const int32_t picture_dx = dx;
+    dx = dy;
+    dy = -picture_dx;
+  }
+  if (x0 == 0 && x1 == BSP_LCD_H_RES && dx == 0) {
+    return dy < 0 || (uint32_t)dy >= TAB5_MIN_DIRECT_ROWS
+               ? copy_rows(host, y0, y1, dy)
+               : copy_rows_down(host, y0, y1, (uint32_t)dy);
+  }
+  uint16_t *band = host->lanes[1].strips[0];
+  const size_t band_bytes = TAB5_STRIP_BYTES;
+  const uint32_t w = x1 - x0;
+  const uint32_t band_rows = band_bytes / (w * sizeof(uint16_t));
+  for (uint32_t done = 0; done < y1 - y0;) {
+    const uint32_t rows = y1 - y0 - done < band_rows ? y1 - y0 - done : band_rows;
+    const uint32_t y = dy > 0 ? y1 - done - rows : y0 + done;
+    const uint32_t from_y = y - dy;
+    const uint32_t from_x = x0 - dx;
+    const size_t frame_bytes =
+        BSP_LCD_V_RES * BSP_LCD_H_RES * sizeof(uint16_t);
+    ESP_RETURN_ON_ERROR(copy_block(host, band, w, 0, 0, host->framebuffer,
+                                   BSP_LCD_H_RES, from_x, from_y, w, rows,
+                                   band_bytes, rows, BSP_LCD_V_RES),
+                        TAG, "move read");
+    ESP_RETURN_ON_ERROR(copy_block(host, host->framebuffer, BSP_LCD_H_RES, x0,
+                                   y, band, w, 0, 0, w, rows, frame_bytes,
+                                   BSP_LCD_V_RES, rows),
+                        TAG, "move write");
+    done += rows;
+  }
+  return ESP_OK;
+}
+
+/* Wait until no strip of the lane is being presented. */
+static void wait_presented(tab5_lane_t *lane) {
+  for (size_t index = 0; index < 2U; ++index) {
+    xSemaphoreTake(lane->idle[index], portMAX_DELAY);
+    xSemaphoreGive(lane->idle[index]);
+  }
+}
+
+static esp_err_t present_strip(tab5_host_t *host, tab5_lane_t *lane,
                                const pocketjs_ui_frame_view_t *frame,
-                               pocketjs_rgb565_rect_t rect) {
+                               pocketjs_rgb565_rect_t rect, uint32_t index) {
   const uint32_t density = frame->raster_density;
   const uint32_t width = frame->logical_width * density;
   const uint32_t x = rect.x * density;
   const uint32_t y = rect.y * density;
   const uint32_t w = rect.width * density;
   const uint32_t h = rect.height * density;
+  const uint32_t scale = host->scale;
+  if (!host->landscape && scale == 1U && w == width) {
+    /* A full-width portrait strip is one contiguous run of panel rows. */
+    return esp_async_memcpy(lane->copy, host->framebuffer + y * width,
+                            lane->strips[index],
+                            (size_t)w * h * sizeof(uint16_t), on_copy_done,
+                            lane->idle[index]);
+  }
   ppa_srm_oper_config_t operation = {
       .in =
           {
-              .buffer = host->strip,
+              .buffer = lane->strips[index],
               .pic_w = width,
               .pic_h = h,
               .block_w = w,
@@ -102,58 +337,137 @@ static esp_err_t present_strip(tab5_host_t *host,
               .buffer_size = BSP_LCD_H_RES * BSP_LCD_V_RES * sizeof(uint16_t),
               .pic_w = BSP_LCD_H_RES,
               .pic_h = BSP_LCD_V_RES,
-              .block_offset_x = x,
-              .block_offset_y = y,
+              .block_offset_x = x * scale,
+              .block_offset_y = y * scale,
               .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
           },
       .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
-      .scale_x = 1.0f,
-      .scale_y = 1.0f,
-      .mode = PPA_TRANS_MODE_BLOCKING,
+      .scale_x = (float)scale,
+      .scale_y = (float)scale,
+      .mode = PPA_TRANS_MODE_NON_BLOCKING,
+      .user_data = lane->idle[index],
   };
   if (host->landscape) {
     /* Picture (x, y) lands on panel (y, width - 1 - x). */
-    operation.out.block_offset_x = y;
-    operation.out.block_offset_y = width - x - w;
+    operation.out.block_offset_x = y * scale;
+    operation.out.block_offset_y = (width - x - w) * scale;
     operation.rotation_angle = PPA_SRM_ROTATION_ANGLE_90;
   }
-  return ppa_do_scale_rotate_mirror(host->present, &operation);
+  return ppa_do_scale_rotate_mirror(lane->present, &operation);
+}
+
+static esp_err_t run_lane(tab5_host_t *host, tab5_lane_t *lane) {
+  const pocketjs_ui_frame_view_t *frame = host->frame;
+  const size_t row_pixels = (size_t)frame->logical_width *
+                            frame->raster_density * frame->raster_density;
+  for (;;) {
+    const uint32_t next = atomic_fetch_add(&host->next_strip, 1U);
+    if (next >= host->strip_count)
+      return ESP_OK;
+    const pocketjs_rgb565_rect_t rect = host->strips[next];
+    const uint32_t index = lane->next_strip;
+    lane->next_strip ^= 1U;
+    xSemaphoreTake(lane->idle[index], portMAX_DELAY);
+    pocketjs_rgb565_render_stats_t stats = {.struct_size = sizeof(stats)};
+    esp_err_t result = pocketjs_rgb565_render_strip(
+        lane->renderer, frame, lane->strips[index], row_pixels * rect.height,
+        rect, lane->accelerator, &stats);
+    /* A strip may cover rows the motion still has to read. */
+    xEventGroupWaitBits(host->move_state, TAB5_MOVED_BIT, pdFALSE, pdTRUE,
+                        portMAX_DELAY);
+    if (result == ESP_OK)
+      result = present_strip(host, lane, frame, rect, index);
+    if (result != ESP_OK) {
+      xSemaphoreGive(lane->idle[index]);
+      atomic_store(&host->next_strip, host->strip_count);
+      return result;
+    }
+  }
+}
+
+/* Move the frame's motion, if any, and open presentation. */
+static void move_frame(tab5_host_t *host) {
+  if ((xEventGroupGetBits(host->move_state) & TAB5_MOVED_BIT) != 0U)
+    return;
+  host->move_result = move_pixels(host, host->frame, &host->motion);
+  xEventGroupSetBits(host->move_state, TAB5_MOVED_BIT);
+}
+
+static void helper_task(void *user_data) {
+  tab5_host_t *host = user_data;
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    move_frame(host);
+    host->lanes[1].result = run_lane(host, &host->lanes[1]);
+    xTaskNotifyGive(host->runner);
+  }
 }
 
 static esp_err_t after_turn(const pocketjs_ui_frame_view_t *frame,
                             void *user_data) {
   tab5_host_t *host = user_data;
+  pocketjs_rgb565_renderer_t *renderer = host->lanes[0].renderer;
   pocketjs_rgb565_damage_plan_t plan = {.struct_size = sizeof(plan)};
-  ESP_RETURN_ON_ERROR(
-      pocketjs_rgb565_prepare(host->renderer, host->target, frame, &plan), TAG,
-      "prepare");
-  const size_t row_pixels = (size_t)frame->logical_width *
-                            frame->raster_density * frame->raster_density;
+  pocketjs_rgb565_motion_t motion = {.struct_size = sizeof(motion)};
+  ESP_RETURN_ON_ERROR(pocketjs_rgb565_prepare_motion(renderer, host->target,
+                                                     frame, &plan, &motion),
+                      TAG, "prepare");
+  host->frame = frame;
+  host->motion = motion;
+  host->move_result = ESP_OK;
+  if (motion.present) {
+    xEventGroupClearBits(host->move_state, TAB5_MOVED_BIT);
+  } else {
+    xEventGroupSetBits(host->move_state, TAB5_MOVED_BIT);
+  }
+  host->strip_count = 0;
   for (uint32_t index = 0; index < plan.region_count; ++index) {
-    const pocketjs_rgb565_rect_t region = plan.regions[index];
-    const uint32_t bottom = region.y + region.height;
-    for (uint32_t y = region.y; y < bottom; y += TAB5_STRIP_ROWS) {
-      pocketjs_rgb565_rect_t rect = region;
-      rect.y = y;
-      rect.height = bottom - y < TAB5_STRIP_ROWS ? bottom - y : TAB5_STRIP_ROWS;
-      pocketjs_rgb565_render_stats_t stats = {.struct_size = sizeof(stats)};
-      esp_err_t result = pocketjs_rgb565_render_strip(
-          host->renderer, frame, host->strip, row_pixels * rect.height, rect,
-          host->accelerator, &stats);
-      if (result == ESP_OK)
-        result = present_strip(host, frame, rect);
-      if (result != ESP_OK) {
-        pocketjs_rgb565_abort(host->renderer, host->target);
-        return result;
+    pocketjs_rgb565_rect_t region = plan.regions[index];
+    /* PPA output buffers must span whole 128-byte cache lines: an even
+     * number of logical rows keeps a portrait strip's size a multiple of
+     * 128 bytes. Repainting one more row is exact. */
+    if ((region.height & 1U) != 0U) {
+      if (region.y + region.height < frame->logical_height)
+        ++region.height;
+      else if (region.y > 0U) {
+        --region.y;
+        ++region.height;
       }
     }
+    const uint32_t bottom = region.y + region.height;
+    for (uint32_t y = region.y; y < bottom; y += host->strip_rows) {
+      pocketjs_rgb565_rect_t rect = region;
+      rect.y = y;
+      rect.height = bottom - y < host->strip_rows ? bottom - y : host->strip_rows;
+      host->strips[host->strip_count++] = rect;
+    }
+  }
+  esp_err_t result = ESP_OK;
+  if (host->strip_count > 0U) {
+    host->runner = xTaskGetCurrentTaskHandle();
+    atomic_store(&host->next_strip, 0U);
+    xTaskNotifyGive(host->helper);
+    result = run_lane(host, &host->lanes[0]);
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    wait_presented(&host->lanes[0]);
+    wait_presented(&host->lanes[1]);
+    if (result == ESP_OK)
+      result = host->lanes[1].result;
+  } else {
+    move_frame(host);
+  }
+  if (result == ESP_OK)
+    result = host->move_result;
+  if (result != ESP_OK) {
+    pocketjs_rgb565_abort(renderer, host->target);
+    return result;
   }
   const uint32_t elapsed =
       (uint32_t)(esp_timer_get_time() - host->frame_started);
   host->frame_us += elapsed;
   if (elapsed > host->frame_max_us)
     host->frame_max_us = elapsed;
-  return pocketjs_rgb565_commit(host->renderer, host->target, frame);
+  return pocketjs_rgb565_commit(renderer, host->target, frame);
 }
 
 static void start_panel(tab5_host_t *host) {
@@ -173,21 +487,47 @@ static void start_panel(tab5_host_t *host) {
   ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(lcd.panel, true));
   ESP_ERROR_CHECK(bsp_display_backlight_on());
   ESP_ERROR_CHECK(bsp_touch_new(NULL, &host->touch));
-
-  const ppa_client_config_t present_config = {
-      .oper_type = PPA_OPERATION_SRM,
-      .max_pending_trans_num = 1,
-  };
-  ESP_ERROR_CHECK(ppa_register_client(&present_config, &host->present));
 }
 
-void app_main(void) {
+static void start_lane(tab5_lane_t *lane, uint32_t scale, size_t strip_bytes) {
+  pocketjs_rgb565_renderer_config_t renderer_config;
+  pocketjs_rgb565_renderer_config_defaults(&renderer_config);
+  renderer_config.scale = scale;
+  ESP_ERROR_CHECK(
+      pocketjs_rgb565_renderer_create(&renderer_config, &lane->renderer));
+  pocketjs_esp32p4_ppa_t *ppa = NULL;
+  ESP_ERROR_CHECK(pocketjs_esp32p4_ppa_create(&ppa));
+  lane->accelerator = pocketjs_esp32p4_ppa_accelerator(ppa);
+  const ppa_client_config_t present_config = {
+      .oper_type = PPA_OPERATION_SRM,
+      .max_pending_trans_num = 2,
+  };
+  ESP_ERROR_CHECK(ppa_register_client(&present_config, &lane->present));
+  const ppa_event_callbacks_t present_callbacks = {
+      .on_trans_done = on_srm_done,
+  };
+  ESP_ERROR_CHECK(
+      ppa_client_register_event_callbacks(lane->present, &present_callbacks));
+  async_memcpy_config_t copy_config = ASYNC_MEMCPY_DEFAULT_CONFIG();
+  copy_config.backlog = 2;
+  copy_config.dma_burst_size = 64;
+  ESP_ERROR_CHECK(esp_async_memcpy_install_gdma_axi(&copy_config, &lane->copy));
+  for (size_t index = 0; index < 2U; ++index) {
+    lane->strips[index] = heap_caps_aligned_alloc(
+        128, strip_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    lane->idle[index] = xSemaphoreCreateBinary();
+    assert(lane->strips[index] != NULL && lane->idle[index] != NULL);
+    xSemaphoreGive(lane->idle[index]);
+  }
+}
+
+static void run_app(void *unused) {
   static tab5_host_t host;
   const pocketjs_package_host_contract_t *contract =
       &pocketjs_package_app_contract;
   start_panel(&host);
   host.landscape = contract->physical_width > contract->physical_height;
-  /* Both host profiles fill the panel at raster density 2. */
+  /* Both host profiles fill the panel. */
   assert((host.landscape ? contract->physical_height
                          : contract->physical_width) == BSP_LCD_H_RES);
   assert((host.landscape ? contract->physical_width
@@ -227,28 +567,46 @@ void app_main(void) {
   ESP_ERROR_CHECK(pocketjs_guest_eval(guest, (const char *)app.javascript.data,
                                       app.javascript.size - 1U, "app"));
 
-  pocketjs_rgb565_renderer_config_t renderer_config;
-  pocketjs_rgb565_renderer_config_defaults(&renderer_config);
-  renderer_config.scale = contract->raster_density;
-  ESP_ERROR_CHECK(
-      pocketjs_rgb565_renderer_create(&renderer_config, &host.renderer));
+  host.scale = contract->physical_width /
+               (contract->logical_width * contract->raster_density);
+  /* Strip bytes per logical row of the raster. */
+  const size_t row_bytes = (size_t)contract->logical_width *
+                           contract->raster_density *
+                           contract->raster_density * sizeof(uint16_t);
+  host.strip_rows = TAB5_STRIP_BYTES / row_bytes;
+  assert(8U * ((contract->logical_height + host.strip_rows - 1U) /
+               host.strip_rows) <= TAB5_MAX_STRIPS);
+  start_lane(&host.lanes[0], contract->raster_density, TAB5_STRIP_BYTES);
+  start_lane(&host.lanes[1], contract->raster_density, TAB5_STRIP_BYTES);
   ESP_ERROR_CHECK(pocketjs_rgb565_target_create(&host.target));
-  pocketjs_esp32p4_ppa_t *ppa = NULL;
-  ESP_ERROR_CHECK(pocketjs_esp32p4_ppa_create(&ppa));
-  host.accelerator = pocketjs_esp32p4_ppa_accelerator(ppa);
-  host.strip = heap_caps_aligned_alloc(
-      128,
-      (size_t)contract->physical_width * TAB5_STRIP_ROWS *
-          contract->raster_density * sizeof(uint16_t),
-      MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-  assert(host.strip != NULL);
+  const ppa_client_config_t mover_config = {
+      .oper_type = PPA_OPERATION_SRM,
+      .max_pending_trans_num = 1,
+  };
+  ESP_ERROR_CHECK(ppa_register_client(&mover_config, &host.mover));
+  async_memcpy_config_t mover_copy_config = ASYNC_MEMCPY_DEFAULT_CONFIG();
+  mover_copy_config.backlog = TAB5_MOVE_BACKLOG;
+  mover_copy_config.dma_burst_size = 64;
+  ESP_ERROR_CHECK(
+      esp_async_memcpy_install_gdma_axi(&mover_copy_config, &host.mover_copy));
+  host.moved = xSemaphoreCreateCounting(TAB5_MOVE_BACKLOG, 0);
+  host.written = xSemaphoreCreateCounting(2, 0);
+  host.move_state = xEventGroupCreate();
+  assert(host.moved != NULL && host.written != NULL &&
+         host.move_state != NULL);
 
   pocketjs_runner_config_t runner_config;
   pocketjs_runner_config_defaults(&runner_config);
-  runner_config.task_stack_bytes = 64U * 1024U;
+  runner_config.task_stack_bytes = 24U * 1024U;
+  runner_config.task_core = 0;
   runner_config.sample_input = sample_input;
   runner_config.after_turn = after_turn;
   runner_config.user_data = &host;
+  /* The helper renders the second lane on core 1. */
+  const BaseType_t created =
+      xTaskCreatePinnedToCore(helper_task, "pocketjs_lane", 16U * 1024U, &host,
+                              runner_config.task_priority, &host.helper, 1);
+  assert(created == pdPASS);
   pocketjs_runner_t *runner = NULL;
   ESP_ERROR_CHECK(pocketjs_runner_start(binding, &runner_config, &runner));
 
@@ -269,4 +627,13 @@ void app_main(void) {
     host.frame_max_us = 0;
     last = stats;
   }
+}
+
+void app_main(void) {
+  /* Evaluating Clear needs about 100 KB of stack. A PSRAM stack leaves the
+   * internal RAM to the four strips. */
+  const BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
+      run_app, "pocketjs_app", 128U * 1024U, NULL, 1, NULL, 0,
+      MALLOC_CAP_SPIRAM);
+  assert(created == pdPASS);
 }
