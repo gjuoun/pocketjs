@@ -3,7 +3,7 @@ set(POCKETJS_TAB5_APP "hero" CACHE STRING "Embedded app: hero, clear or home")
 # holds the selected app, so every variant links the system component; only
 # the home variant compiles it in (TAB5_LAUNCHER).
 idf_component_register(
-    SRCS "main.c"
+    SRCS "main.c" "tab5_camera_media.c"
     REQUIRES
         esp_driver_dma
         esp_driver_ppa
@@ -15,6 +15,8 @@ idf_component_register(
         pocket_render_esp_ppa
         pocket_runner
         pocket_runtime
+        pocket_camera
+        pocket_media
         pocket_system
 )
 

@@ -21,7 +21,11 @@ pocket-shell against `home.runtime-config.ts`, as the launcher and boots one
 runtime per app; SELECT from the home control returns to the launcher. The
 primary surface of the profile is laid out into a PSRAM buffer that nothing
 scans out. `pocket_idf_package_open` (the IDF archive) admits a stored package
-for the profile before the runtime boots it.
+for the profile before the runtime boots it. `components/pocket_camera` serves
+`globalThis.camera` (the SC202CS on MIPI-CSI: a 320x240 preview at 15 fps,
+QR decoding, JPEG stills on the card) and `components/pocket_media` serves
+`globalThis.media` (the companion's stream on the ES8388 speaker) to a guest
+whose plan declares those capabilities.
 
 A picture smaller than the screen sits between two equal black margins. The
 display moves retained pixels for content that only scrolled

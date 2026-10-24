@@ -33,9 +33,11 @@
 #include "pocket/package_source.h"
 #include "pocket/runner.h"
 #include "pocket_profile.h"
+#include "pocket_spec.h"
 #include "pocketjs/esp32p4_ppa_lanes.h"
 #include "pocketjs/esp32p4_ppa_status.h"
 #include "pocketjs_package_app.h"
+#include "tab5_camera_media.h"
 
 #ifndef TAB5_LAUNCHER
 #define TAB5_LAUNCHER 0
@@ -65,11 +67,6 @@ static const char *TAG = "pocketjs_tab5";
 /* Where the launcher keeps installed apps: the microSD card when one is in
  * the slot, the `storage` flash partition otherwise. */
 #define TAB5_STORE "/pocket"
-/* The applications operations (contracts/spec/ui-ops.ts): the launcher's
- * app table, a launch by output name and a screenshot request. */
-#define TAB5_OP_APP_TABLE 39U
-#define TAB5_OP_APP_LAUNCH 40U
-#define TAB5_OP_APP_SHOT 41U
 
 /* The primary surface of a profile whose picture is the auxiliary surface:
  * laid out off screen into one PSRAM buffer that nothing scans out. */
@@ -414,14 +411,14 @@ static int32_t applications(void *context, uint16_t op,
   out->bytes = NULL;
   out->byte_length = 0;
   switch (op) {
-  case TAB5_OP_APP_TABLE: {
+  case POCKET_OP_appTable: {
     const char *table = pocketjs_system_app_table();
     out->tag = POCKET_RESULT_BYTES;
     out->bytes = (const uint8_t *)table;
     out->byte_length = strlen(table);
     return POCKET_STATUS_OK;
   }
-  case TAB5_OP_APP_LAUNCH:
+  case POCKET_OP_appLaunch:
     if (!args || length < sizeof *args || args->struct_size < sizeof *args ||
         args->tag != POCKET_ARG_BYTES ||
         args->byte_length >= sizeof launch_output)
@@ -431,7 +428,7 @@ static int32_t applications(void *context, uint16_t op,
     out->tag = POCKET_RESULT_I64;
     out->integer = pocketjs_system_launch(launch_output) ? 1 : 0;
     return POCKET_STATUS_OK;
-  case TAB5_OP_APP_SHOT:
+  case POCKET_OP_appShot:
     out->tag = POCKET_RESULT_I64;
     out->integer = -1;
     return POCKET_STATUS_OK;
@@ -442,9 +439,9 @@ static int32_t applications(void *context, uint16_t op,
 
 static const pocket_op_provider_v1 APPLICATIONS = {sizeof APPLICATIONS,
                                                    applications};
-static const uint16_t APPLICATION_OPS[] = {TAB5_OP_APP_TABLE,
-                                           TAB5_OP_APP_LAUNCH,
-                                           TAB5_OP_APP_SHOT};
+static const uint16_t APPLICATION_OPS[] = {POCKET_OP_appTable,
+                                           POCKET_OP_appLaunch,
+                                           POCKET_OP_appShot};
 #endif
 
 /* ---- the panel ------------------------------------------------------------- */
@@ -483,6 +480,7 @@ static void interrupt_guest(void *context) {
 static void before_tick(void *context) {
   tab5_host_t *host = context;
   host->tick_started = esp_timer_get_time();
+  tab5_camera_media_present();
 #if TAB5_LAUNCHER
   pocketjs_system_pump();
   if (pocketjs_system_switch_pending() && !host->switch_signalled) {
@@ -508,9 +506,12 @@ static void stop_guest(tab5_host_t *host) {
   tab5_guest_t *running = &host->running;
   if (running->runner)
     ESP_ERROR_CHECK(pocket_runner_stop(running->runner));
-  /* The runtime goes before its guest, renderers and displays. */
-  if (running->runtime)
+  /* Camera and media textures belong to the runtime, which goes before its
+   * guest, renderers and displays. */
+  if (running->runtime) {
+    tab5_camera_media_teardown();
     pocket_runtime_destroy(running->runtime);
+  }
   if (running->guest)
     pocket_guest_idf_destroy(running->guest);
   if (running->lanes)
@@ -527,7 +528,9 @@ static void stop_guest(tab5_host_t *host) {
  * as the running app of the launcher mode and installs the system
  * namespaces into its realm. */
 static int32_t boot_guest(tab5_host_t *host, const uint8_t *bytes, size_t size,
-                          int32_t (*bind)(JSContext *realm, void *context),
+                          int32_t (*bind)(JSContext *realm,
+                                          pocket_runtime *runtime,
+                                          void *context),
                           void *bind_context) {
   tab5_guest_t *running = &host->running;
   const pocket_profile_facts *facts = pocket_profile.facts;
@@ -593,7 +596,8 @@ static int32_t boot_guest(tab5_host_t *host, const uint8_t *bytes, size_t size,
         sizeof APPLICATION_OPS / sizeof *APPLICATION_OPS);
 #endif
   if (status == POCKET_STATUS_OK && bind)
-    status = bind(pocket_guest_idf_context(running->guest), bind_context);
+    status = bind(pocket_guest_idf_context(running->guest), running->runtime,
+                  bind_context);
   if (status == POCKET_STATUS_OK) {
     const int64_t started = esp_timer_get_time();
     status = pocket_runtime_boot(running->runtime);
@@ -624,9 +628,14 @@ static int32_t boot_guest(tab5_host_t *host, const uint8_t *bytes, size_t size,
 }
 
 #if TAB5_LAUNCHER
-static int32_t bind_system(JSContext *realm, void *context) {
-  return pocketjs_system_bind(realm, context) == ESP_OK ? POCKET_STATUS_OK
-                                                        : POCKET_STATUS_FAILED;
+static int32_t bind_system(JSContext *realm, pocket_runtime *runtime,
+                           void *context) {
+  const pocketjs_system_app_t *app = context;
+  if (pocketjs_system_bind(realm, app) != ESP_OK)
+    return POCKET_STATUS_FAILED;
+  tab5_camera_media_install(realm, runtime,
+                            pocketjs_system_app_facts(app)->features);
+  return POCKET_STATUS_OK;
 }
 
 /* Boot `app`; on failure the guest is torn down. */
