@@ -209,7 +209,7 @@ bundle. Options of `tools/companion-app.ts`:
 | --- | --- |
 | `--apps <dir>` | copies the `.pocket` files of `<dir>` into `Contents/Resources/apps`; the app offers them with no folder set (repeatable) |
 | `--release` | leaves out `PocketRepoAppsDir`, the checkout's `dist/3ds` |
-| `--universal` | builds every executable for `arm64` and `x86_64` and joins them with `lipo`; the Intel daemon is Bun's baseline build, which runs without AVX |
+| `--universal` | builds every executable for `arm64` and `x86_64` and joins them with `lipo` |
 | `--version <v>` | `CFBundleShortVersionString` |
 | `--sign <identity>` | signs with a Developer ID, the hardened runtime and a timestamp; the daemon gets the JIT entitlements a compiled Bun program needs |
 | `--notarize <profile>` | submits the signed app to Apple's notary service with a `notarytool` keychain profile, staples the ticket and checks it with `spctl` |

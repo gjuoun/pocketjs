@@ -156,8 +156,8 @@ const helpers = [
   { name: "pocket-websignin", source: "WebSignIn.swift", main: false },
 ];
 const arches = universal ? ["arm64", "x86_64"] : [process.arch === "arm64" ? "arm64" : "x86_64"];
-/** Bun's compile target for an architecture; Intel takes the baseline build, which runs without AVX (Rosetta has none). */
-const BUN_TARGETS: Record<string, string> = { arm64: "bun-darwin-arm64", x86_64: "bun-darwin-x64-baseline" };
+/** Bun's compile target for an architecture. Every Intel Mac that runs macOS 15 has AVX2; under Rosetta the Intel daemon prints Bun's AVX warning and runs. */
+const BUN_TARGETS: Record<string, string> = { arm64: "bun-darwin-arm64", x86_64: "bun-darwin-x64" };
 
 /** Build `out` once per architecture and join the slices with lipo. */
 async function fat(out: string, build: (arch: string, slice: string) => Promise<unknown>) {
