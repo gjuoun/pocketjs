@@ -1152,6 +1152,56 @@ impl Ui {
         true
     }
 
+    /// Overwrite the rectangle `x, y, w, h` of a live non-T8 texture IN PLACE
+    /// with `pixels`, `w * h` texels in the texture's own format, rows packed
+    /// (a host's camera or video plane: the handle and its image bindings
+    /// stay while the bytes change). Returns false, changing nothing, on
+    /// stale handles, T8 textures, a rectangle outside the texture or a size
+    /// mismatch.
+    pub fn update_texture_rect(
+        &mut self,
+        handle: i32,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        pixels: &[u8],
+    ) -> bool {
+        let Some(slot) = tex_resolve(&self.textures, handle) else {
+            return false;
+        };
+        let Some(tex) = self.textures[slot as usize].tex.as_mut() else {
+            return false;
+        };
+        let bpp = match tex.psm {
+            spec::psm::PSM_5650 | spec::psm::PSM_4444 => 2usize,
+            spec::psm::PSM_8888 => 4usize,
+            _ => return false,
+        };
+        if w == 0 || h == 0 || x.checked_add(w).map_or(true, |right| right > tex.w)
+            || y.checked_add(h).map_or(true, |bottom| bottom > tex.h)
+            || pixels.len() != w as usize * h as usize * bpp
+        {
+            return false;
+        }
+        let row_bytes = w as usize * bpp;
+        let stride = tex.w as usize * bpp;
+        let base = tex.data.as_mut_ptr() as *mut u8;
+        for row in 0..h as usize {
+            let offset = (y as usize + row) * stride + x as usize * bpp;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    pixels.as_ptr().add(row * row_bytes),
+                    base.add(offset),
+                    row_bytes,
+                );
+            }
+        }
+        tex.revision = tex.revision.wrapping_add(1);
+        self.bump_raster_revision();
+        true
+    }
+
     /// Release a texture slot (spec op freeTexture): drop the pixels, bump
     /// the slot's generation so every outstanding copy of the handle goes
     /// stale (resolves to nothing, draws nothing), and push the slot on the

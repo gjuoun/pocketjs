@@ -381,6 +381,30 @@ pub unsafe extern "C" fn pocketjs_native_ui_upload_texture(
     handle
 }
 
+/// Overwrite a rectangle of a live texture in place (`Ui::update_texture_rect`):
+/// 0, or -1 when the core refuses it.
+#[no_mangle]
+pub unsafe extern "C" fn pocketjs_native_ui_update_texture_rect(
+    core: *mut NativeUiCore,
+    handle: i32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    data: *const u8,
+    size: usize,
+) -> i32 {
+    let Some(core) = core_mut(core) else {
+        return -1;
+    };
+    let Some(data) = bytes(data, size) else {
+        return -1;
+    };
+    let updated = core.ui.update_texture_rect(handle, x, y, width, height, data);
+    mutated(core);
+    if updated { 0 } else { -1 }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pocketjs_native_ui_upload_img_entry(
     core: *mut NativeUiCore,

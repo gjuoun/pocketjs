@@ -3457,6 +3457,30 @@ fn update_texture_t8_overwrites_in_place() {
     assert!(!ui.update_texture_t8(plane, &pal, &px), "stale handle");
 }
 
+#[test]
+fn update_texture_rect_overwrites_in_place() {
+    let mut ui = Ui::new();
+    let plane = ui.upload_texture(&[0u8; 4 * 2 * 2], 4, 2, spec::psm::PSM_5650);
+    assert!(plane >= 0);
+    let before = ui.raster_revision();
+    // A 2x1 rectangle at (1, 1): two texels, the rest stays zero.
+    assert!(ui.update_texture_rect(plane, 1, 1, 2, 1, &[0x11, 0x22, 0x33, 0x44]));
+    let view = ui.texture(plane).expect("plane still live");
+    assert_eq!(&view.pixels[8..16], &[0, 0, 0x11, 0x22, 0x33, 0x44, 0, 0]);
+    assert_eq!(&view.pixels[..8], &[0u8; 8]);
+    assert_eq!(ui.texture_revision(plane), Some(1));
+    assert_ne!(ui.raster_revision(), before);
+
+    assert!(!ui.update_texture_rect(plane, 3, 0, 2, 1, &[0u8; 4]), "past the right edge");
+    assert!(!ui.update_texture_rect(plane, 0, 0, 2, 1, &[0u8; 3]), "wrong byte count");
+    assert!(!ui.update_texture_rect(plane, 0, 0, 0, 1, &[]), "empty rectangle");
+    assert_eq!(ui.texture_revision(plane), Some(1));
+    let indexed = ui.upload_texture(&[0u8; 1024 + 16], 4, 4, spec::psm::PSM_T8);
+    assert!(!ui.update_texture_rect(indexed, 0, 0, 1, 1, &[0u8; 1]), "T8 texture");
+    ui.free_texture(plane);
+    assert!(!ui.update_texture_rect(plane, 0, 0, 1, 1, &[0u8; 2]), "stale handle");
+}
+
 /// Cross-language contract: the committed .pkst golden is WRITTEN by the TS
 /// stream writer (now in pocket-nexus/pocket-youtube, host/ring.ts;
 /// regenerated there by UPDATE=1 bun test tests/host.test.ts and copied here)
