@@ -19,20 +19,12 @@ owner task. ESP32-P4 can register PPA; S3, C3 and C6 use the software renderer.
 Only the runner creates a task. Only the PPA component includes accelerator
 headers. Package admission and UI state remain in runtime crates.
 
-`programs/m5stack-tab5` is complete firmware for the M5Stack Tab5 (ESP32-P4,
-720x1280 MIPI-DSI panel, GT911 touch). **It embeds `apps/hero` at 640x360
-at raster density 2 by default; `-DPOCKETJS_TAB5_APP=clear` embeds
-`apps/clear` at 360x640.** Each app's `pocket.tab5.json` declares that
-viewport against the program's `hero.runtime-config.ts` or
-`clear.runtime-config.ts`. The DPI display turns a landscape picture 90
-degrees onto the portrait panel with the PPA and moves retained pixels for
+**The M5Stack Tab5 firmware lives in pocket-nexus/pocket-m5**
+(`programs/m5stack-tab5`), which pins this repository as a submodule and
+composes these components. The DPI display turns a landscape picture 90
+degrees onto a portrait panel with the PPA and moves retained pixels for
 content that only scrolled (`POCKET_DISPLAY_RETAINED_MOVE`); two PPA
 renderers, one per core, split every strip (`pocketjs_esp32p4_ppa_lanes`).
-
-```sh
-cd programs/m5stack-tab5
-idf.py -DPOCKETJS_TAB5_APP=clear build flash
-```
 
 ## Native archive identity
 

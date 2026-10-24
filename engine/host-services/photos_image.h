@@ -1,6 +1,7 @@
 /*
  * Photo code that touches no console service, compiled by every host with a
- * photo store (products/3ds, programs/m5stack-tab5/components/pocket_camera):
+ * photo store (products/3ds; pocket-nexus/pocket-m5
+ * programs/m5stack-tab5/components/pocket_camera):
  * DCF names, the camera's RGB565 to RGB888, and the box-filtered thumbnail and
  * full view in the core's PSM_5650 (red in the low bits). Each host brings
  * its own JPEG codec. tests/fixtures/3ds-photos.c runs this natively.

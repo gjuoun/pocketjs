@@ -22,7 +22,7 @@ every program implements once.
 | Program | Build | `host_services.h` implementation |
 | --- | --- | --- |
 | Nintendo 3DS product | `products/3ds/Makefile` (`SHARED`) | `products/3ds/src/services_host.c`: libctru clocks and `ps:ps` randomness, the CFG owner name, `soc:U`, the SD card runtime slots (`runtime.c`), the agent channel (`agent.c`) |
-| M5Stack Tab5 | `programs/m5stack-tab5/components/pocket_system`, `pocket_camera`, `pocket_media` | `src/services_host.c` in `pocket_system`: `esp_timer`, `esp_fill_random`, lwIP, the `/pocket` store; the camera and media components compile the photo, QR and media sources |
+| M5Stack Tab5 | pocket-nexus/pocket-m5 `programs/m5stack-tab5/components/pocket_system`, `pocket_camera`, `pocket_media` | `src/services_host.c` in `pocket_system`: `esp_timer`, `esp_fill_random`, lwIP, the `/pocket` store; the camera and media components compile the photo, QR and media sources |
 
 `platforms/3ds/media.c` reads the media headers from this directory. The
 build machine compiles `fs.c`, `jscan.c`, `link.c`, `launcher.c`,

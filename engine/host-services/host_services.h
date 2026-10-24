@@ -1,7 +1,7 @@
 /*
  * What a native host provides to the sources in engine/host-services. Each
  * host implements every function declared here once (the 3DS in
- * products/3ds/src/services_host.c, the M5Stack Tab5 in
+ * products/3ds/src/services_host.c, the M5Stack Tab5 in pocket-nexus/pocket-m5
  * programs/m5stack-tab5/components/pocket_system/src/services_host.c); the
  * shared sources never name a platform API themselves.
  */
