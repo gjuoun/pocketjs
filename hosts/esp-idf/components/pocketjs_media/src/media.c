@@ -533,14 +533,15 @@ esp_err_t pocketjs_media_setup(const pocketjs_media_config_t *config) {
                board.audio_open(board.context, MEDIA_SAMPLE_RATE) == ESP_OK;
   if (!audio_live)
     ESP_LOGW(TAG, "no speaker: streams play muted");
-  if (xTaskCreatePinnedToCoreWithCaps(stream_run, "pocketjs_media", STREAM_STACK, NULL,
-                              3, &stream_task, board.worker_core,
-                                         MALLOC_CAP_SPIRAM) != pdPASS)
+  if (xTaskCreatePinnedToCoreWithCaps(stream_run, "pocketjs_media",
+                                      STREAM_STACK, NULL, 3, &stream_task,
+                                      board.worker_core,
+                                      MALLOC_CAP_SPIRAM) != pdPASS)
     return ESP_ERR_NO_MEM;
   if (audio_live &&
-      xTaskCreatePinnedToCoreWithCaps(audio_run, "pocketjs_audio", AUDIO_STACK, NULL,
-                              6, &audio_task, board.worker_core,
-                                         MALLOC_CAP_SPIRAM) != pdPASS)
+      xTaskCreatePinnedToCoreWithCaps(audio_run, "pocketjs_audio", AUDIO_STACK,
+                                      NULL, 6, &audio_task, board.worker_core,
+                                      MALLOC_CAP_SPIRAM) != pdPASS)
     return ESP_ERR_NO_MEM;
   started = true;
   return ESP_OK;
@@ -669,6 +670,8 @@ void pocketjs_media_teardown(void) {
   texture_handle = -1;
   ui_core = NULL;
 }
+
+
 
 // ---------------------------------------------------------------------------
 // globalThis.media

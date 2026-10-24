@@ -492,18 +492,18 @@ static bool start_capture(void) {
   payload_sequence = 0;
   polled_sequence = 0;
   last_scan_us = 0;
-  if (xTaskCreatePinnedToCoreWithCaps(capture_run, "pocketjs_camera", CAPTURE_STACK,
-                              NULL, 4, &capture_task,
-                              board.worker_core,
-                                         MALLOC_CAP_SPIRAM) != pdPASS) {
+  if (xTaskCreatePinnedToCoreWithCaps(capture_run, "pocketjs_camera",
+                                      CAPTURE_STACK, NULL, 4, &capture_task,
+                                      board.worker_core,
+                                      MALLOC_CAP_SPIRAM) != pdPASS) {
     capture_task = NULL;
     snprintf(error, sizeof error, "camera task allocation failed");
     return false;
   }
   if ((open_flags & CAMERA_OPEN_NO_SCAN) == 0 &&
-      xTaskCreatePinnedToCoreWithCaps(decode_run, "pocketjs_qr", DECODE_STACK, NULL,
-                              2, &decode_task, board.worker_core,
-                                         MALLOC_CAP_SPIRAM) != pdPASS) {
+      xTaskCreatePinnedToCoreWithCaps(decode_run, "pocketjs_qr", DECODE_STACK,
+                                      NULL, 2, &decode_task, board.worker_core,
+                                      MALLOC_CAP_SPIRAM) != pdPASS) {
     decode_task = NULL;
     snprintf(error, sizeof error, "QR task allocation failed");
     return false;
@@ -659,6 +659,7 @@ static const char *camera_info_json(void) {
            (unsigned long)atomic_load(&stills));
   return info_out;
 }
+
 
 // ---------------------------------------------------------------------------
 // globalThis.camera

@@ -367,8 +367,8 @@ static void run_save(job_t *job, result_t *result) {
   int number = own_number();
   if (number < 1 || number > 9999)
     return fail(result, "the photo folder is full");
-  snprintf(result->name, sizeof result->name, OWN_FOLDER "/" OWN_PREFIX "%04d.JPG",
-           number);
+  snprintf(result->name, sizeof result->name,
+           OWN_FOLDER "/" OWN_PREFIX "%04d.JPG", number);
   char path[PATH_CAPACITY], temporary[PATH_CAPACITY + 4];
   photo_path(path, sizeof path, result->name);
   snprintf(temporary, sizeof temporary, "%s.TMP", path);
@@ -417,7 +417,8 @@ static uint8_t *decode(const char *name, long *source_bytes, uint32_t *width,
   size_t allocated = 0;
   uint8_t *bytes = jpeg_alloc_decoder_mem((size_t)size, &memory, &allocated);
   FILE *file = bytes == NULL ? NULL : fopen(path, "rb");
-  bool read = file != NULL && fread(bytes, 1, (size_t)size, file) == (size_t)size;
+  bool read =
+      file != NULL && fread(bytes, 1, (size_t)size, file) == (size_t)size;
   if (file != NULL)
     fclose(file);
   if (!read) {
@@ -526,8 +527,9 @@ static bool ensure_worker(void) {
   stopping = false;
   /* Below the UI and render tasks: encoding and decoding take what the
    * frames leave. */
-  return xTaskCreatePinnedToCoreWithCaps(worker_run, "pocketjs_photos", WORKER_STACK,
-                                 NULL, 2, &worker, worker_core,
+  return xTaskCreatePinnedToCoreWithCaps(worker_run, "pocketjs_photos",
+                                         WORKER_STACK, NULL, 2, &worker,
+                                         worker_core,
                                          MALLOC_CAP_SPIRAM) == pdPASS;
 }
 
