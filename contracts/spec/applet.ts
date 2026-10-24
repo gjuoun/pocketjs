@@ -118,6 +118,8 @@ export const APPLET_MODULES = [
   "physics",
   "media",
   "audio",
+  "display",
+  "platform",
 ] as const;
 /** Modules allowed when the manifest declares the capability that gates them. */
 export const APPLET_GATED_MODULES: Readonly<Record<string, readonly string[]>> = {

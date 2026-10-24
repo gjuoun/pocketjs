@@ -74,7 +74,6 @@ typedef struct {
   pocketjs_rgb565_renderer_t *renderer;
   const pocketjs_rgb565_accelerator_t *accelerator;
   ppa_client_handle_t present;
-  async_memcpy_handle_t copy;
   uint16_t *strips[2];
   SemaphoreHandle_t idle[2];
   uint32_t next_strip;
@@ -86,6 +85,9 @@ typedef struct {
   pocketjs_rgb565_target_t *target;
   uint16_t *framebuffer;
   tab5_lane_t lanes[2];
+  /* One DMA channel presents both lanes' full-width strips: the chip has
+   * three AXI channel pairs, and the third stays free for the SPI bus. */
+  async_memcpy_handle_t copy;
   /* Strips of the frame being drawn; both lanes claim them in order. */
   const pocketjs_ui_frame_view_t *frame;
   pocketjs_rgb565_rect_t strips[TAB5_MAX_STRIPS];
@@ -360,7 +362,7 @@ static esp_err_t copy_rows_down(tab5_host_t *host, uint32_t y0, uint32_t y1,
                                 uint32_t dy) {
   const size_t row_bytes = BSP_LCD_H_RES * sizeof(uint16_t);
   uint16_t *framebuffer = host->framebuffer;
-  async_memcpy_handle_t writer = host->lanes[1].copy;
+  async_memcpy_handle_t writer = host->copy;
   const uint32_t band_rows = host->strip_bytes / row_bytes;
   const uint32_t count = (y1 - y0 + band_rows - 1U) / band_rows;
   uint32_t reads = 0;
@@ -490,7 +492,7 @@ static esp_err_t present_strip(tab5_host_t *host, tab5_lane_t *lane,
   if (!host->landscape && scale == 1U && w == width &&
       width == BSP_LCD_H_RES) {
     /* A full-width portrait strip is one contiguous run of panel rows. */
-    return esp_async_memcpy(lane->copy,
+    return esp_async_memcpy(host->copy,
                             host->framebuffer + (host->origin_y + y) * width,
                             lane->strips[index],
                             (size_t)w * h * sizeof(uint16_t), on_copy_done,
@@ -689,10 +691,6 @@ static void start_lane(tab5_lane_t *lane, uint32_t scale, size_t strip_bytes) {
   };
   ESP_ERROR_CHECK(
       ppa_client_register_event_callbacks(lane->present, &present_callbacks));
-  async_memcpy_config_t copy_config = ASYNC_MEMCPY_DEFAULT_CONFIG();
-  copy_config.backlog = 2;
-  copy_config.dma_burst_size = 64;
-  ESP_ERROR_CHECK(esp_async_memcpy_install_gdma_axi(&copy_config, &lane->copy));
   for (size_t index = 0; index < 2U; ++index) {
     lane->strips[index] = heap_caps_aligned_alloc(
         128, strip_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
@@ -939,6 +937,10 @@ static void run_app(void *unused) {
   assert(8U * ((picture_height / contract->raster_density + host.strip_rows -
                 1U) /
                host.strip_rows) <= TAB5_MAX_STRIPS);
+  async_memcpy_config_t copy_config = ASYNC_MEMCPY_DEFAULT_CONFIG();
+  copy_config.backlog = 4;
+  copy_config.dma_burst_size = 64;
+  ESP_ERROR_CHECK(esp_async_memcpy_install_gdma_axi(&copy_config, &host.copy));
   /* The four strips are the largest internal DMA blocks the firmware holds:
    * take them before the panel and the radio's buffers split the heap. */
   start_lane(&host.lanes[0], contract->raster_density, host.strip_bytes);
