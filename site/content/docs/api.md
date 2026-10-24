@@ -13,7 +13,7 @@ Framework-internal and tests/debug helpers are not exhaustive here. For conceptu
 | `solid-js` | `createSignal`, `createEffect`, `createMemo`, `onMount`, `onCleanup`, `batch`, `untrack`, `Show`, `For`, `Index`, `Switch`, `Match` |
 | `vue` | `defineComponent`, `ref`, `computed`, `watchEffect`, `onMounted`, `onScopeDispose` |
 | `octane` | `useState`, `useEffect`, `useMemo`, `useRef`, `useLayoutEffect`, `useEffectEvent` |
-| `@pocketjs/framework/animation` | `animate`, `spring`, `jump`, `cancelAnim` |
+| `@pocketjs/framework/animation` | `animate`, `spring`, `jump`, `cancelAnim`, `animationClass` |
 | `@pocketjs/framework/physics` | `createWorld`, `hasPhysics`, `World`, `Body`, `Collider`, `Zone`, `Emitter` and their option types — see [Physics](/docs/physics/) |
 | `@pocketjs/framework/lifecycle` | `onFrame`, `onButtonPress`, `analogX`, `analogY`, `analogRaw`, `createSpriteAnimation`, `pushButtonHandlerBlock` (Octane builds: `useFrame`, `useButtonPress`, `useSpriteAnimation`) |
 | `@pocketjs/framework/input` | `BTN`, `touches`, `auxiliaryTouches`, `focusNode`, `getFocused`, `pressNode`, `setActiveNode`, `pushFocusScope`, `pushFocusGrid`, `pushFocusController`, `hitFocusable`, `hitNode`, `enableCursor`, `cursorX`, `cursorY` |
@@ -536,6 +536,19 @@ function cancelAnim(animId: number): void
 ```
 
 Stops a running animation by the id `animate`/`spring` returned.
+
+### `animationClass`
+
+```ts
+const animationClass: "composited" | "repaint" | "still";
+```
+
+What a changed frame costs the target this bundle was compiled for, from
+the plan (see [Platform contracts](/docs/platform-contracts/#animation-classes)).
+`composited` is a GPU; `repaint` is a CPU that pays per repainted pixel and
+moves translated opaque regions; `still` is electronic paper, where
+`animate` and `spring` set the end value and return `0`. A bundle built
+without a plan reads `composited`.
 
 ---
 

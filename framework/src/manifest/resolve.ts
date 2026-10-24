@@ -1,6 +1,7 @@
 import { isHostExtension, type HostExtension } from "./host-extension.ts";
 import { hashPocketProfile, profileHashProjection } from "../profile.ts";
 import { DYNAMIC_FORMS, PACKAGE_ROLES, TARGET_FORMS } from "../../../contracts/spec/platforms.ts";
+import { deriveAnimationClass } from "../../../contracts/spec/animation.ts";
 import { deriveModality, modalityMisses } from "../../../contracts/spec/modality.ts";
 import type {
   ManifestViewport,
@@ -745,6 +746,7 @@ export function resolveBuildPlan(
     },
     ...(resolvedAuxiliary ? { surfaces: { auxiliary: resolvedAuxiliary } } : {}),
     modality,
+    animation: deriveAnimationClass(profile),
     features,
     companions: manifest.app.companions ?? [],
     ...(request.hostExtension ? { hostExtension: request.hostExtension } : {}),
