@@ -2,14 +2,17 @@
 #include "esp_attr.h"
 #include "esp_cache.h"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "pocket/display_esp_dpi.h"
+#include <inttypes.h>
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+static const char *TAG = "pocket_display_esp_dpi";
 /* A present takes milliseconds; a wait past this bound fails and keeps the
  * buffer reserved. */
 #define WAIT_TIMEOUT_MS 1000
@@ -285,6 +288,10 @@ static int32_t descriptor(void *context, pocket_display_descriptor *out) {
 static int32_t acquire(void *context, const pocket_rect *region,
                        pocket_target *out) {
   pocket_display_esp_dpi *d = context;
+  if (d && region && region->struct_size >= sizeof(*region) &&
+      region->height > d->config.strip_rows)
+    ESP_LOGE(TAG, "acquire of %" PRIu32 " rows: a strip holds %" PRIu32,
+             region->height, d->config.strip_rows);
   if (!d || !region || region->struct_size < sizeof(*region) || !out ||
       out->struct_size < sizeof(*out) || region->x ||
       region->width != d->config.width || !region->height ||
@@ -379,7 +386,10 @@ static int32_t flush(void *context, const pocket_rect *regions, size_t count,
   r = regions;
   for (size_t i = 0; i < count; i++) {
     blend_overlay(d, b, r);
-    if (present(d, b, r) != ESP_OK) {
+    const esp_err_t presented = present(d, b, r);
+    if (presented != ESP_OK) {
+      ESP_LOGE(TAG, "present of %" PRIu32 "x%" PRIu32 " at %" PRIu32 ",%" PRIu32 ": %s",
+               r->width, r->height, r->x, r->y, esp_err_to_name(presented));
       (void)drain(b, portMAX_DELAY);
       d->active = UINT32_MAX;
       if (d->generation == UINT64_MAX)
@@ -405,6 +415,8 @@ static int32_t wait_display(void *context, uint64_t token) {
       continue;
     b->pending = false;
     if (!drain(b, pdMS_TO_TICKS(WAIT_TIMEOUT_MS))) {
+      ESP_LOGE(TAG, "%" PRIu32 " presents of strip %" PRIu32 " did not complete in %d ms",
+               b->submitted, b->region.y, WAIT_TIMEOUT_MS);
       b->timed_out = true;
       return POCKET_STATUS_FAILED;
     }
