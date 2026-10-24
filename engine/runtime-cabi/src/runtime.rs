@@ -325,6 +325,45 @@ pub unsafe extern "C" fn pocket_runtime_supports_op(runtime: *const PocketRuntim
 }
 
 /// # Safety
+/// runtime is live and no guest or driver callback is running; pixels
+/// supplies length readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_runtime_update_texture(
+    runtime: *mut PocketRuntime,
+    texture: i32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    pixels: *const u8,
+    length: usize,
+) -> i32 {
+    let Some(handle) = (unsafe { handle(runtime) }) else {
+        return POCKET_STATUS_INVALID;
+    };
+    if let Err(status) = invalidate(handle) {
+        return status;
+    }
+    if handle.operation_active.get() || handle.guest_active.get() {
+        return POCKET_STATUS_FAILED;
+    }
+    let bytes = match unsafe { crate::adapters::borrowed(pixels, length) } {
+        Ok(bytes) => bytes,
+        Err(error) => return error.status(),
+    };
+    match handle.ops.core_mut() {
+        Ok(mut core) => {
+            if core.ui.update_texture_rect(texture, x, y, width, height, bytes) {
+                POCKET_STATUS_OK
+            } else {
+                POCKET_STATUS_INVALID
+            }
+        }
+        Err(error) => status(error),
+    }
+}
+
+/// # Safety
 /// runtime is live. args supplies length readable bytes of aligned extensible
 /// argument records and borrowed payloads; out supplies its writable prefix.
 #[no_mangle]
