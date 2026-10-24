@@ -286,7 +286,8 @@ fn unpack_rgb565(pixel: u16) -> (u32, u32, u32) {
 /// by the full-frame and compact-window targets so a strip render stays
 /// bit-identical to the same window of a full render by construction.
 #[inline]
-fn blend_rgb565_pixel(pixel: &mut u16, r: u32, g: u32, b: u32, a: u32) {
+/// Blend straight-alpha RGB over one RGB565 pixel with the rasterizer's arithmetic.
+pub fn blend_rgb565_pixel(pixel: &mut u16, r: u32, g: u32, b: u32, a: u32) {
     if a >= 255 {
         *pixel = pack_rgb565(r, g, b);
         return;
