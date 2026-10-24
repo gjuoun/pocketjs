@@ -16,7 +16,7 @@ Framework-internal and tests/debug helpers are not exhaustive here. For conceptu
 | `@pocketjs/framework/animation` | `animate`, `spring`, `jump`, `cancelAnim`, `animationClass` |
 | `@pocketjs/framework/physics` | `createWorld`, `hasPhysics`, `World`, `Body`, `Collider`, `Zone`, `Emitter` and their option types — see [Physics](/docs/physics/) |
 | `@pocketjs/framework/lifecycle` | `onFrame`, `onButtonPress`, `analogX`, `analogY`, `analogRaw`, `createSpriteAnimation`, `pushButtonHandlerBlock` (Octane builds: `useFrame`, `useButtonPress`, `useSpriteAnimation`) |
-| `@pocketjs/framework/input` | `BTN`, `touches`, `auxiliaryTouches`, `focusNode`, `getFocused`, `pressNode`, `setActiveNode`, `pushFocusScope`, `pushFocusGrid`, `pushFocusController`, `hitFocusable`, `hitNode`, `enableCursor`, `cursorX`, `cursorY` |
+| `@pocketjs/framework/input` | `BTN`, `touches`, `auxiliaryTouches`, `onTextEvent`, `hasTextInput`, `focusNode`, `getFocused`, `pressNode`, `setActiveNode`, `pushFocusScope`, `pushFocusGrid`, `pushFocusController`, `hitFocusable`, `hitNode`, `enableCursor`, `cursorX`, `cursorY` |
 | `@pocketjs/framework/gesture` | `createGesture`, `attachGesture`, `pushTouchBlock`, gesture types (Solid and Vue Vapor) |
 | `@pocketjs/framework/kinetics` | `createScroller`, `bindDpadScroll`, `Scroller` / `ScrollerOptions` / `ScrollerState` types (Solid and Vue Vapor) |
 | `@pocketjs/framework/osk` | `Osk`, `TextField`, `createOsk`, `OSK_H`, `OSK_LAYERS`, `OSK_LAYOUTS`, `oskPanelHeight`, `resetPanelMemory` (Solid) |

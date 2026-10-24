@@ -73,6 +73,12 @@ export interface Console3ds {
   drag(x0: number, y0: number, x1: number, y1: number, frames?: number): Promise<void>;
   /** One button pulse, then `settle` idle frames. */
   press(button: number, settle?: number): Promise<void>;
+  /** The keyboard types `text`: one frame committing it, then `settle` idle frames. */
+  type(text: string, settle?: number): Promise<void>;
+  /** The keyboard presses an editing key (`Enter`, `Backspace`, `ArrowLeft`,
+   *  `Control+z`): one frame with its down edge, one with its release, then
+   *  `settle` idle frames. */
+  key(name: string, settle?: number): Promise<void>;
   /** Visible texts on a surface, in tree order. */
   texts(surface?: SimSurface): string[];
   /** The box of the last painted text equal to `text` (the one drawn on top), or null. */
@@ -239,6 +245,15 @@ export async function bootConsole3ds(options: Console3dsOptions): Promise<Consol
     },
     async press(button, settle = 2) {
       await step({ buttons: button });
+      await run(settle);
+    },
+    async type(text, settle = 2) {
+      await step({ text: [{ commit: text }] });
+      await run(settle);
+    },
+    async key(name, settle = 2) {
+      await step({ text: [{ key: name }] });
+      await step({ text: [{ key: name, pressed: false }] });
       await run(settle);
     },
     texts: (surface = "primary") => flatTexts(world.tree(surface), surface === "auxiliary" ? touchScreen : TOP_SCREEN, []),

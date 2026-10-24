@@ -26,7 +26,7 @@ use record::abi_record;
 // Registration precedes boot. A renderer id binds each display to one renderer; POCKET_RENDERER_SOFTWARE selects the built-in software rasterizer. Multiple displays may share a renderer instance.
 // Operation providers implement declared non-core ui operations. Registration copies the operation list and vtable, rejects unknown/core/duplicate operations, and precedes boot. Context storage lasts through runtime destruction. Provider dispatch may not reenter the runtime; result bytes remain valid until its next dispatch, and the runtime copies them before returning to the guest.
 // Each tick samples inputs, invokes the guest frame once, computes layout, renders and presents. A DEFERRED renderer's frame completes at the start of the next present, so its device work overlaps the next guest turn. The platform owns threads and tick scheduling. Calls on one instance must not overlap; guest bindings may call runtime_op during initialize/evaluate/frame/collect callbacks.
-// The guest receives eight frame arguments through pocket_guest_frame. Their wire representation and tape format are independent of the binding generation and package format.
+// The guest receives the eight frame arguments and the frame's text events through pocket_guest_frame. Their wire representation and tape format are independent of the binding generation and package format. A text event names an editing key as KeyboardEvent.key does (Enter, Backspace, Delete, Escape, Tab, ArrowLeft, Home), with a held modifier in front: Control+z, Alt+ArrowLeft.
 // Destroy completes in-flight DEFERRED frames and drains rendering and display transfers before shutting down the guest and releasing package or frame resources.
 // An application links exactly one PocketJS Rust archive. The six pocket_host_* functions are supplied by the program and are the archive's complete host-hook contract.
 
@@ -741,7 +741,7 @@ abi_record! {
 }
 
 abi_record! {
-    /// Legacy frame argument packet encoded by the runtime, including hit facts. touches/hits/touch_surfaces have touch_count entries. Borrowed until the guest frame callback returns.
+    /// Legacy frame argument packet encoded by the runtime, including hit facts. touches/hits/touch_surfaces have touch_count entries; text has text_count entries, the frame's text events in order. Borrowed until the guest frame callback returns.
     pub struct PocketGuestFrame {
         pub struct_size: usize,
         pub buttons: u32,
@@ -754,6 +754,8 @@ abi_record! {
         pub axis_deltas: *const PocketAxisDelta,
         pub axis_delta_count: usize,
         pub motion: *const PocketMotionState,
+        pub text: *const PocketTextEvent,
+        pub text_count: usize,
     }
 }
 
