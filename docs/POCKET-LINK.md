@@ -249,9 +249,11 @@ Quitting the app stops the daemon. Daemon output goes to
 `$POCKET_COMPANION_HOME` for the store.
 
 Launch arguments for checks: `--show-window` opens the window at launch,
-`--pair` opens a pairing window, `--snapshot <png> [--page <page>]` renders a
-page (`start`, `consoles`, `applets`, `x`, `discord`, `youtube`, `assistant`,
-`settings`) to a PNG after five seconds without screen-recording permission.
+`--pair` opens a pairing window, `--snapshot <png> [--page <page>] [--window]`
+renders a page (`start`, `consoles`, `applets`, `x`, `discord`, `youtube`,
+`assistant`, `settings`) to a PNG after five seconds without screen-recording
+permission; `--window` draws the page inside a picture of the window's title
+bar and sidebar (Pocket Studio's listing pictures).
 
 ## Tests
 
