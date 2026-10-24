@@ -13,6 +13,15 @@ export const POCKET_IDF_UI_CAPABILITIES = [
   "input.cursor",
   "input.touch",
   "text.glyphs.baked",
+  "display.auxiliary",
+  "input.touch.auxiliary",
+  "net.http",
+  "link.companion",
+  "system.wifi",
+  "camera.qr",
+  "camera.photo",
+  "data.fs",
+  "media.playback",
 ] as const satisfies readonly PocketCapabilityId[];
 
 export const POCKET_IDF_HOST_VERSION = 1 as const;
@@ -32,6 +41,15 @@ export interface PocketIdfHostProfile {
     readonly logicalViewports: readonly Viewport[];
     readonly presentations: readonly PresentationMode[];
     readonly rasterDensity: number;
+    /** The second output an application draws on (`display.auxiliary`). A
+     *  single-panel product presents it on the panel and keeps the primary
+     *  surface laid out off screen. */
+    readonly auxiliary?: {
+      readonly physicalViewport: Viewport;
+      readonly logicalViewports: readonly Viewport[];
+      readonly presentations: readonly PresentationMode[];
+      readonly rasterDensity: number;
+    };
   };
   readonly capabilities: readonly PocketCapabilityId[];
 }
@@ -82,6 +100,22 @@ export const pocketIdfHostSchema = {
           uniqueItems: true,
         },
         rasterDensity: { type: "integer", minimum: 1, maximum: 255 },
+        auxiliary: {
+          type: "object",
+          additionalProperties: false,
+          required: ["physicalViewport", "logicalViewports", "presentations", "rasterDensity"],
+          properties: {
+            physicalViewport: viewportSchema,
+            logicalViewports: { type: "array", items: viewportSchema, minItems: 1, uniqueItems: true },
+            presentations: {
+              type: "array",
+              items: { enum: PRESENTATION_MODES },
+              minItems: 1,
+              uniqueItems: true,
+            },
+            rasterDensity: { type: "integer", minimum: 1, maximum: 255 },
+          },
+        },
       },
     },
     capabilities: {

@@ -58,12 +58,17 @@ export function validatePocketIdfHostProfile(input: unknown): ValidationResult<P
         message: "target id must occupy at most 15 UTF-8 bytes",
       });
     }
-    if (profile.capabilities.includes("input.touch")) {
-      profile.display.logicalViewports.forEach((viewport, index) => {
+    const touchSurfaces = [
+      ["input.touch", "/display", profile.display.logicalViewports],
+      ["input.touch.auxiliary", "/display/auxiliary", profile.display.auxiliary?.logicalViewports ?? []],
+    ] as const;
+    for (const [capability, path, viewports] of touchSurfaces) {
+      if (!profile.capabilities.includes(capability)) continue;
+      viewports.forEach((viewport, index) => {
         if (viewport[0] > 1024 || viewport[1] > 1024) {
           diagnostics.push({
             code: "idfHost.touchViewportTooLarge",
-            path: `/display/logicalViewports/${index}`,
+            path: `${path}/logicalViewports/${index}`,
             message: "touch-capable logical viewports must fit the 10-bit coordinate contract",
           });
         }
