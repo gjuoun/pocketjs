@@ -58,6 +58,7 @@ pocketjs/
 │  ├─ pocketbook/           reader program and InkView integration
 │  ├─ linux-kms/            Linux program with its own profile
 │  ├─ esp-idf/archive/      one Rust archive for the IDF composition
+│  ├─ m5stack-tab5/         ESP32-P4 tablet: embedded apps and the Pocket Home launcher
 │  └─ native/               compatibility C-shell composition and QuickJS glue
 ├─ products/
 │  └─ 3ds/                  Link, launcher, camera and development product

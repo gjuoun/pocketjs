@@ -115,6 +115,11 @@ pub struct DisplayDescriptor {
     pub device_frame_storage: bool,
     pub device_rotation: bool,
     pub device_scaling: bool,
+    /// The device moves retained pixels inside its frame storage
+    /// ([`DisplayOutput::move_pixels`]), so presentation can reuse content
+    /// that only moved. Only valid with device frame storage and partial
+    /// refresh.
+    pub retained_move: bool,
     pub vsync: VsyncSource,
 }
 
@@ -143,6 +148,7 @@ impl DisplayDescriptor {
             device_frame_storage: false,
             device_rotation: false,
             device_scaling: false,
+            retained_move: false,
             vsync: VsyncSource::None,
         }
     }
@@ -301,4 +307,13 @@ pub trait DisplayOutput {
     /// memory released by renderer retirement.
     fn wait(&mut self, token: Self::Token) -> Result<(), DisplayError>;
     fn vsync(&mut self) -> VsyncSource;
+    /// Move retained pixels for a `retained_move` display: every pixel of
+    /// `destination` takes the value of the pixel at `(-dx, -dy)` from it.
+    /// Called after [`frame_identity`](Self::frame_identity) and before the
+    /// frame's first acquire; the move completes before any later flush
+    /// writes. An error leaves `destination` undefined.
+    fn move_pixels(&mut self, destination: Rect, dx: i32, dy: i32) -> Result<(), DisplayError> {
+        let _ = (destination, dx, dy);
+        Err(DisplayError::Unsupported)
+    }
 }
