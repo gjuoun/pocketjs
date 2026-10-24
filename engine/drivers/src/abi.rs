@@ -155,8 +155,11 @@ pub type PocketDisplayWaitFn = unsafe extern "C" fn(context: *mut c_void, token:
 
 pub type PocketDisplayVsyncFn = unsafe extern "C" fn(context: *mut c_void) -> u32;
 
-/// RETAINED_MOVE displays only. Called after frame_identity and before the frame's first acquire: every retained pixel of destination takes the value of the pixel at (-dx, -dy) from it. The display completes the move before any later flush writes. An error leaves destination undefined; the runtime repaints the whole target next frame.
+/// RETAINED_MOVE displays only. Called after frame_identity and before the frame's first acquire: every retained pixel of destination takes the value of the pixel at (-dx, -dy) from it. The display completes the move before any later flush writes. UNSUPPORTED declines this move: the pixels stay and the runtime repaints destination. Any other error leaves destination undefined; the runtime repaints the whole target next frame.
 pub type PocketDisplayMoveFn = unsafe extern "C" fn(context: *mut c_void, destination: *const PocketRect, dx: i32, dy: i32) -> i32;
+
+/// Optional. Called once per frame after frame_identity and the frame's move, before its first acquire: up to capacity physical rectangles the display needs repainted besides the frame's own damage, such as a host overlay whose face changed or whose pixels a move carried along. The runtime repaints them this frame.
+pub type PocketDisplayHostDamageFn = unsafe extern "C" fn(context: *mut c_void, out: *mut PocketRect, capacity: usize, count: *mut usize) -> i32;
 
 pub type PocketRendererDescriptorFn = unsafe extern "C" fn(context: *mut c_void, out: *mut PocketRendererDescriptor) -> i32;
 
@@ -556,6 +559,7 @@ abi_record! {
         pub vsync: Option<PocketDisplayVsyncFn>,
         pub frame_identity: Option<PocketDisplayFrameIdentityFn>,
         pub move_pixels: Option<PocketDisplayMoveFn>,
+        pub host_damage: Option<PocketDisplayHostDamageFn>,
     }
 }
 
