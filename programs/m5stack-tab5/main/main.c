@@ -53,6 +53,9 @@ static const char *TAG = "pocketjs_tab5";
 /* Staging bytes per strip at most; a strip holds the whole raster rows that
  * fit, in multiples of the display's row quantum. */
 #define TAB5_STRIP_BYTES (128U * 1024U)
+/* Internal RAM the launcher's strips leave to the JPEG codec and the
+ * coprocessor link (see the strip budget below). */
+#define TAB5_INTERNAL_RESERVE (64U * 1024U)
 /* Copies queued on the move channel at once. */
 #define TAB5_MOVE_BACKLOG 8U
 /* Contacts the GT911 reports at once. */
@@ -800,11 +803,19 @@ static void run_app(void *unused) {
   size_t strip_budget = TAB5_STRIP_BYTES;
   if (TAB5_LAUNCHER) {
     /* The launcher's radio, store and link take internal RAM outside the
-     * largest heap region: both strips come from that region. */
+     * largest heap region: both strips come from that region, and leave
+     * TAB5_INTERNAL_RESERVE of it to what allocates later: the JPEG
+     * codec's DMA descriptors (Camera, Photos) and the coprocessor link's
+     * receive pool, which both failed when the strips took it all. */
     const size_t block = heap_caps_get_largest_free_block(
         MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    if (block / 2U - 128U < strip_budget)
-      strip_budget = block / 2U - 128U;
+    const size_t shared = block > TAB5_INTERNAL_RESERVE + 256U
+                              ? (block - TAB5_INTERNAL_RESERVE) / 2U - 128U
+                              : 0U;
+    if (shared < strip_budget)
+      strip_budget = shared;
+    ESP_LOGI(TAG, "internal RAM: largest block %u bytes, strips 2 x %u",
+             (unsigned)block, (unsigned)strip_budget);
   }
   const uint32_t strip_rows =
       strip_budget / (width * 2U) / host.quantum * host.quantum;
