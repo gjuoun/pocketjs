@@ -31,6 +31,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "esp_video_device.h"
+#include "esp_video_isp_ioctl.h"
 #include "linux/videodev2.h"
 #include "photos.h"
 #include "pocket/textures.h"
@@ -475,6 +477,27 @@ static bool allocate_buffers(void) {
 }
 
 /* The tasks for the camera `open_flags` names. */
+/* The ISP keeps the colour matrix the image pipeline last set, and the
+ * pipeline's own values run past the hardware's (-4, 4) range: the first
+ * stream only logged the rejected reconfigurations, the next start failed
+ * on the stored matrix and the preview stayed black. Each start begins
+ * from the identity. */
+static void reset_color_matrix(void) {
+  const int isp = open(ESP_VIDEO_ISP1_DEVICE_NAME, O_RDWR);
+  if (isp < 0)
+    return;
+  esp_video_isp_ccm_t ccm = {.enable = true};
+  for (int i = 0; i < ISP_CCM_DIMENSION; i++)
+    ccm.matrix[i][i] = 1.0f;
+  struct v4l2_ext_control control = {.id = V4L2_CID_USER_ESP_ISP_CCM,
+                                     .p_u8 = (uint8_t *)&ccm};
+  struct v4l2_ext_controls controls = {
+      .ctrl_class = V4L2_CID_USER_CLASS, .count = 1, .controls = &control};
+  if (ioctl(isp, VIDIOC_S_EXT_CTRLS, &controls) != 0)
+    ESP_LOGW(TAG, "the colour matrix did not reset: errno %d", errno);
+  close(isp);
+}
+
 static bool start_capture(void) {
   if (!allocate_buffers()) {
     snprintf(error, sizeof error, "camera buffers did not fit in memory");
@@ -489,6 +512,7 @@ static bool start_capture(void) {
     }
   }
   sensor_started = true;
+  reset_color_matrix();
   latest = -1;
   reading = -1;
   atomic_store(&stopping, false);
