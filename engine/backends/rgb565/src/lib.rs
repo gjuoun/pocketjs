@@ -928,11 +928,19 @@ impl Renderer {
             return true;
         }
         let rect = local_physical_rect(logical, surface, self.config.scale);
+        if rect.is_empty() {
+            return true;
+        }
         if a == 255 && rect.area() >= self.config.min_fill_pixels {
             if ppa.fill_rgb565(destination, width, height, rect, pack_rgb565(r, g, b)) {
                 stats.ppa_fills += 1;
                 return true;
             }
+        } else if a == 255 {
+            // A fill below the PPA's worth is a row loop, not a draw list
+            // of its own through the generic rasterizer.
+            fill_rgb565_rect(destination, width, rect, pack_rgb565(r, g, b));
+            return true;
         } else if a < 255
             && self.cpu_blend_max_pixels > 0
             && (rect.area() <= self.cpu_blend_max_pixels || flat_row(destination, width, rect))
@@ -1047,10 +1055,16 @@ impl Renderer {
         bounds = bounds.intersect(clip);
         let global_rect = physical_rect(bounds, self.config.scale);
         let rect = local_physical_rect(bounds, surface, self.config.scale);
-        if rect.is_empty() || rect.area() < self.config.min_blend_pixels {
+        if rect.is_empty() {
+            return true;
+        }
+        // A run below the PPA's worth blends its mask on the CPU below;
+        // one above the CPU's worth but below the PPA's takes the generic
+        // rasterizer.
+        let cpu_blend_max_pixels = self.cpu_blend_max_pixels;
+        if rect.area() < self.config.min_blend_pixels && rect.area() > cpu_blend_max_pixels {
             return false;
         }
-        let cpu_blend_max_pixels = self.cpu_blend_max_pixels;
         let mask = self.mask_mut();
         fill_mask_rect(mask, width, rect, 0);
         let density = atlas.raster_density as i32;
