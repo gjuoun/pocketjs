@@ -28,6 +28,7 @@ pocketjs/
 │  ├─ guest-rquickjs/       Rust guest lifecycle and generated operation bindings
 │  ├─ guest-web/            generated browser guest bindings
 │  ├─ modules/              media transport and shared offload queues
+│  ├─ host-services/        C link, launcher, fs and photo services for native programs
 │  ├─ backends/gpui/        desktop renderer and text integration
 │  ├─ ios/                 UIKit runtime integration
 │  ├─ crates/              module, UI embedding, text and widget libraries
