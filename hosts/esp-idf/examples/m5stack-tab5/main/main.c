@@ -723,9 +723,6 @@ static void start_lane(tab5_lane_t *lane, uint32_t scale, size_t strip_bytes) {
   }
 }
 
-
-
-
 /* One running guest: its QuickJS realm, UI core, binding and runner. */
 typedef struct {
   pocketjs_guest_t *guest;
@@ -917,7 +914,6 @@ static void start_system(void) {
   };
   ESP_ERROR_CHECK(pocketjs_system_start(&config));
 }
-
 
 static void run_app(void *unused) {
   static tab5_host_t host;
