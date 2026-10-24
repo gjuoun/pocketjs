@@ -285,17 +285,30 @@ pub unsafe extern "C" fn pocket_runtime_add_op_provider(
         })
     }
 }
+/// A boot failure names its cause in the host log: the status alone does not
+/// tell package admission from guest evaluation or the first present, and
+/// the guest's error text covers evaluation only.
+fn report_boot_failure(error: RuntimeError) -> RuntimeError {
+    let message = alloc::format!("boot failed: {error:?}");
+    // SAFETY: the message bytes are live for the call.
+    unsafe { pocket_host_log(0, message.as_ptr().cast(), message.len()) };
+    error
+}
 /// # Safety
 /// runtime is a live instance on its owning thread.
 #[no_mangle]
 pub unsafe extern "C" fn pocket_runtime_boot(runtime: *mut PocketRuntime) -> i32 {
-    unsafe { modify(runtime, Runtime::boot) }
+    unsafe { modify(runtime, |runtime| runtime.boot().map_err(report_boot_failure)) }
 }
 /// # Safety
 /// runtime is a live instance on its owning thread.
 #[no_mangle]
 pub unsafe extern "C" fn pocket_runtime_boot_deferred(runtime: *mut PocketRuntime) -> i32 {
-    unsafe { modify(runtime, Runtime::boot_deferred) }
+    unsafe {
+        modify(runtime, |runtime| {
+            runtime.boot_deferred().map_err(report_boot_failure)
+        })
+    }
 }
 /// # Safety
 /// runtime is a live instance on its owning thread.
