@@ -58,10 +58,11 @@ static const char *TAG = "pocketjs_tab5";
  * tall while the panel scans out (measured on ESP32-P4 rev 1.3; 2 and 8 to
  * 28 rows complete), so no turned strip is shorter than this. */
 #define TAB5_MIN_TURNED_ROWS 8U
-/* The home button drawn below a picture shorter than the screen (or beside
- * one narrower than it): a square of oriented screen pixels, and the SELECT
- * bit it sends. */
-#define TAB5_BUTTON_SIZE 88U
+/* The home button drawn below a picture shorter than the screen (or right
+ * of one narrower than it): at most a square this many oriented screen pixels
+ * wide, 4 pixels inside the margin on each side, and the SELECT bit it sends. */
+#define TAB5_BUTTON_MAX 88U
+#define TAB5_BUTTON_INSET 4U
 #define TAB5_BUTTON_SELECT 0x0001U
 /* The embedded app is a launcher (Pocket Home): it installs apps from the
  * linked Mac and switches between them (pocketjs_system). */
@@ -121,12 +122,13 @@ typedef struct {
   uint32_t scale;
   /* The picture's size and top-left corner on the screen as the picture is
    * oriented (1280x720 for landscape), in panel pixels. A picture smaller
-   * than the screen sits in the top-left corner, with the home button in the
-   * space left below or right of it. */
+   * than the screen sits in its middle between two equal black margins; the
+   * home button sits in the margin below or right of it. */
   uint32_t picture_width;
   uint32_t picture_height;
   uint32_t origin_x;
   uint32_t origin_y;
+  uint32_t button_size;
   uint16_t *button;
   bool button_shown;
   bool button_pressed;
@@ -143,24 +145,25 @@ static uint32_t oriented_height(const tab5_host_t *host) {
   return host->landscape ? BSP_LCD_H_RES : BSP_LCD_V_RES;
 }
 
-/* The button's top-left corner on the oriented screen: centered in the space
- * below the picture, or right of it when the picture is as tall as the
+/* The button's top-left corner on the oriented screen: centered in the
+ * margin below the picture, or right of it when the picture is as tall as the
  * screen. */
 static void home_button_origin(const tab5_host_t *host, int32_t *x, int32_t *y) {
   const uint32_t screen_width = host->landscape ? BSP_LCD_V_RES : BSP_LCD_H_RES;
+  const uint32_t size = host->button_size;
   const uint32_t bottom = host->origin_y + host->picture_height;
   if (bottom < oriented_height(host)) {
-    *x = (int32_t)((screen_width - TAB5_BUTTON_SIZE) / 2U);
-    *y = (int32_t)(bottom + (oriented_height(host) - bottom - TAB5_BUTTON_SIZE) / 2U);
+    *x = (int32_t)((screen_width - size) / 2U);
+    *y = (int32_t)(bottom + (oriented_height(host) - bottom - size) / 2U);
     return;
   }
   const uint32_t right = host->origin_x + host->picture_width;
-  *x = (int32_t)(right + (screen_width - right - TAB5_BUTTON_SIZE) / 2U);
-  *y = (int32_t)((oriented_height(host) - TAB5_BUTTON_SIZE) / 2U);
+  *x = (int32_t)(right + (screen_width - right - size) / 2U);
+  *y = (int32_t)((oriented_height(host) - size) / 2U);
 }
 
-/* The whole space below (or beside) the picture answers, so a thumb need
- * not aim. */
+/* The whole margin below (or right of) the picture answers, so a thumb need
+ * not aim; the margin above (or left of) it does not. */
 static bool on_home_button(const tab5_host_t *host, int32_t x, int32_t y) {
   if (host->origin_y + host->picture_height < oriented_height(host))
     return y >= (int32_t)(host->origin_y + host->picture_height);
@@ -172,13 +175,16 @@ static uint16_t rgb565(uint32_t r, uint32_t g, uint32_t b) {
 }
 
 /* Coverage of one pixel by the button's disc and by the rounded square
- * drawn on it, from 4x4 samples. */
-static void button_coverage(float px, float py, float *disc, float *mark) {
-  const float center = TAB5_BUTTON_SIZE / 2.0f;
-  const float radius = 40.0f;
-  const float half = 13.0f;
-  const float corner = 5.5f;
-  const float stroke = 2.5f;
+ * drawn on it, from 4x4 samples. The proportions are those of the 88-pixel
+ * button; the stroke stays at least 1.5 pixels wide. */
+static void button_coverage(uint32_t size, float px, float py, float *disc,
+                            float *mark) {
+  const float unit = size / (float)TAB5_BUTTON_MAX;
+  const float center = size / 2.0f;
+  const float radius = 40.0f * unit;
+  const float half = 13.0f * unit;
+  const float corner = 5.5f * unit;
+  const float stroke = fmaxf(2.5f * unit, 1.5f);
   uint32_t in_disc = 0;
   uint32_t in_mark = 0;
   for (uint32_t sy = 0; sy < 4U; ++sy) {
@@ -202,24 +208,28 @@ static void button_coverage(float px, float py, float *disc, float *mark) {
   *mark = in_mark / 16.0f;
 }
 
+/* The button's pixels rounded up to whole 128-byte cache lines. */
+static size_t button_bytes(uint32_t size) {
+  return (size * size * sizeof(uint16_t) + 127U) & ~(size_t)127U;
+}
+
 /* Paint the home button in its pressed or resting state. The pixels go
  * through the mover's PPA client, which turns them onto the portrait panel
  * like a strip in landscape. */
 static void paint_home_button(tab5_host_t *host) {
-  const uint32_t size = TAB5_BUTTON_SIZE;
+  const uint32_t size = host->button_size;
   const float face = host->button_pressed ? 70.0f : 30.0f;
   for (uint32_t y = 0; y < size; ++y) {
     for (uint32_t x = 0; x < size; ++x) {
       float disc;
       float mark;
-      button_coverage((float)x, (float)y, &disc, &mark);
+      button_coverage(size, (float)x, (float)y, &disc, &mark);
       const float level = disc * face + mark * (142.0f - face);
       host->button[y * size + x] = rgb565((uint32_t)level, (uint32_t)level,
                                           (uint32_t)(level * 1.03f));
     }
   }
-  const size_t bytes = size * size * sizeof(uint16_t);
-  esp_cache_msync(host->button, bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+  esp_cache_msync(host->button, button_bytes(size), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
   int32_t left;
   int32_t top;
   home_button_origin(host, &left, &top);
@@ -944,8 +954,8 @@ static void run_app(void *unused) {
   assert(host.scale >= 1U);
   host.picture_width = picture_width * host.scale;
   host.picture_height = picture_height * host.scale;
-  host.origin_x = 0U;
-  host.origin_y = 0U;
+  host.origin_x = (screen_width - host.picture_width) / 2U;
+  host.origin_y = (screen_height - host.picture_height) / 2U;
   /* Strip bytes per logical row of the raster. */
   const size_t row_bytes =
       (size_t)picture_width * contract->raster_density * sizeof(uint16_t);
@@ -987,10 +997,15 @@ static void run_app(void *unused) {
   mover_copy_config.dma_burst_size = 64;
   ESP_ERROR_CHECK(
       esp_async_memcpy_install_gdma_axi(&mover_copy_config, &host.mover_copy));
-  if (host.picture_width < screen_width || host.picture_height < screen_height) {
-    host.button = heap_caps_aligned_alloc(
-        128, TAB5_BUTTON_SIZE * TAB5_BUTTON_SIZE * sizeof(uint16_t),
-        MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+  const uint32_t margin = host.picture_height < screen_height
+                             ? screen_height - host.origin_y - host.picture_height
+                             : screen_width - host.origin_x - host.picture_width;
+  if (margin > 2U * TAB5_BUTTON_INSET) {
+    host.button_size = margin - 2U * TAB5_BUTTON_INSET < TAB5_BUTTON_MAX
+                           ? margin - 2U * TAB5_BUTTON_INSET
+                           : TAB5_BUTTON_MAX;
+    host.button = heap_caps_aligned_alloc(128, button_bytes(host.button_size),
+                                          MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     assert(host.button != NULL);
     host.button_shown = true;
     paint_home_button(&host);
