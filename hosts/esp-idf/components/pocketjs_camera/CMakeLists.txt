@@ -17,6 +17,10 @@ idf_component_register(
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
+# The P4's FPU is single precision: quirc's perspective fitting in double
+# runs in software.
+target_compile_definitions(${COMPONENT_LIB} PRIVATE
+    QUIRC_FLOAT_TYPE=float QUIRC_USE_TGMATH)
 # Third-party code keeps its own warnings out of the build.
 set_source_files_properties(
     "${shared}/quirc/quirc.c" "${shared}/quirc/decode.c"

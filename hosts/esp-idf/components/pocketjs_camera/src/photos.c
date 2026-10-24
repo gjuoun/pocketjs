@@ -217,13 +217,11 @@ static void write_thumb(const char *name, long source_bytes,
 // the JPEG codec
 // ---------------------------------------------------------------------------
 
+/* The encoder reads its input from any address; the PPA that writes the
+ * still needs a PSRAM cache line (128 bytes) for its start and size. */
 uint16_t *photos_alloc_still(uint32_t width, uint32_t height) {
-  const jpeg_encode_memory_alloc_cfg_t memory = {
-      .buffer_direction = JPEG_ENC_ALLOC_INPUT_BUFFER,
-  };
-  size_t allocated = 0;
-  return jpeg_alloc_encoder_mem((size_t)width * height * 2u, &memory,
-                                &allocated);
+  return heap_caps_aligned_alloc(128, (size_t)width * height * 2u,
+                                 MALLOC_CAP_SPIRAM);
 }
 
 static bool codec_ready(void) {

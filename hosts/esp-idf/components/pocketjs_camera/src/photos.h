@@ -26,7 +26,8 @@ void photos_bind(pocketjs_ui_core_t *core);
  * event then reports the job. */
 bool photos_save(int32_t job, uint16_t *rgb565, uint32_t width,
                  uint32_t height);
-/* A buffer the JPEG encoder reads a width x height RGB565 still from. */
+/* A buffer the PPA writes a width x height RGB565 still to and the JPEG
+ * encoder reads it from. */
 uint16_t *photos_alloc_still(uint32_t width, uint32_t height);
 /* Report still `job` as failed. Any task. */
 void photos_fail(int32_t job, const char *message);
