@@ -583,13 +583,18 @@ static int32_t boot_guest(tab5_host_t *host, const uint8_t *bytes, size_t size,
     if (renderer == POCKET_RENDERER_INVALID)
       status = POCKET_STATUS_FAILED;
   }
+  /* The presenter hands out staging rows from the frame buffer budget in
+   * registration order, and a display whose whole frame fits takes that
+   * frame. The off-screen primary registers first and takes its buffer, so
+   * the picture's display receives rows equal to its strips; after it, the
+   * picture's share would grow by the primary's bytes and exceed a strip. */
+  if (status == POCKET_STATUS_OK && facts->auxiliary)
+    status = pocket_runtime_add_display(running->runtime, &BLANK, &host->blank,
+                                        POCKET_RENDERER_SOFTWARE);
   if (status == POCKET_STATUS_OK)
     status = pocket_runtime_add_display(running->runtime,
                                         pocket_display_esp_dpi_vtable(),
                                         host->display, renderer);
-  if (status == POCKET_STATUS_OK && facts->auxiliary)
-    status = pocket_runtime_add_display(running->runtime, &BLANK, &host->blank,
-                                        POCKET_RENDERER_SOFTWARE);
 #if TAB5_LAUNCHER
   if (status == POCKET_STATUS_OK)
     status = pocket_runtime_add_op_provider(
