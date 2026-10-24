@@ -12,9 +12,14 @@ use pocket_drivers::{
     DamageRect as Clip, PixelFormat, Rect as Region, RenderError, RenderResources, Surface, TexView,
 };
 use pocket_glyph_pages::composite_mask;
-use pocket_raster::{linear_sample_coordinates, pack_rgb565, render_operation, OperationResources};
+use pocket_raster::{
+    blend_rgb565_pixel, linear_sample_coordinates, pack_rgb565, render_operation, OperationResources,
+};
 use pocket_spec as spec;
 const MASK_ALIGNMENT: usize = 128;
+/// Translucent work up to this many physical pixels blends on the CPU: a PPA
+/// transaction costs about as much as blending this area in software.
+const CPU_BLEND_MAX_PIXELS: u32 = 2048;
 const TEXTURE_CLASS_CACHE_LEN: usize = 64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PpaError {
@@ -506,12 +511,20 @@ impl Painter {
             return Ok(true);
         }
         let rect = local_physical_rect(logical, surface, self.config.scale);
+        if rect.is_empty() {
+            return Ok(true);
+        }
         if a == 255 && rect.area() >= self.config.min_fill_pixels {
             if accelerated(ppa.fill_rgb565(destination, width, height, rect, pack_rgb565(r, g, b)))?
             {
                 stats.ppa_fills += 1;
                 return Ok(true);
             }
+        } else if a == 255 {
+            // A fill below the PPA's worth is a row loop, not an operation
+            // of its own through the generic rasterizer.
+            fill_rgb565_rect(destination, width, rect, pack_rgb565(r, g, b));
+            return Ok(true);
         } else if rect.area() >= self.config.min_blend_pixels {
             let mask = self.mask_mut();
             fill_mask_rect(mask, width, rect, a as u8);
@@ -572,7 +585,13 @@ impl Painter {
         bounds = bounds.intersect(clip);
         let global_rect = physical_rect(bounds, self.config.scale);
         let rect = local_physical_rect(bounds, surface, self.config.scale);
-        if rect.is_empty() || rect.area() < self.config.min_blend_pixels {
+        if rect.is_empty() {
+            return Ok(true);
+        }
+        // A run below the PPA's worth blends its mask on the CPU; one above
+        // the CPU's worth but below the PPA's takes the generic rasterizer.
+        let cpu = rect.area() < self.config.min_blend_pixels;
+        if cpu && rect.area() > CPU_BLEND_MAX_PIXELS {
             return Ok(false);
         }
         let mask = self.mask_mut();
@@ -593,6 +612,10 @@ impl Painter {
             a as u8,
         ) {
             return Ok(false);
+        }
+        if cpu {
+            blend_mask_rect(mask, destination, width, rect, [r, g, b]);
+            return Ok(true);
         }
         if accelerated(ppa.blend_a8_rgb565(
             destination,
@@ -854,6 +877,28 @@ fn channels(color: u32) -> (u32, u32, u32, u32) {
 }
 
 #[inline]
+/// Fill `rect` of a packed RGB565 buffer `stride` pixels wide.
+fn fill_rgb565_rect(destination: &mut [u16], stride: u32, rect: Rect, color: u16) {
+    for y in rect.y..rect.y + rect.h {
+        let start = (y * stride + rect.x) as usize;
+        destination[start..start + rect.w as usize].fill(color);
+    }
+}
+
+/// Blend one color through an A8 mask over `rect` of a packed RGB565 buffer
+/// `stride` pixels wide, with the core rasterizer's arithmetic.
+fn blend_mask_rect(mask: &[u8], destination: &mut [u16], stride: u32, rect: Rect, color: [u32; 3]) {
+    for y in rect.y..rect.y + rect.h {
+        let start = (y * stride + rect.x) as usize;
+        let end = start + rect.w as usize;
+        for (pixel, &alpha) in destination[start..end].iter_mut().zip(&mask[start..end]) {
+            if alpha != 0 {
+                blend_rgb565_pixel(pixel, color[0], color[1], color[2], alpha as u32);
+            }
+        }
+    }
+}
+
 fn fill_mask_rect(mask: &mut [u8], stride: u32, rect: Rect, value: u8) {
     assert!(pocket_glyph_pages::fill_mask_rect(
         mask,
