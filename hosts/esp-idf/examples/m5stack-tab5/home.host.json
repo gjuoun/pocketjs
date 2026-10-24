@@ -11,8 +11,8 @@
     "presentations": ["native"],
     "rasterDensity": 2,
     "auxiliary": {
-      "physicalViewport": [720, 1184],
-      "logicalViewports": [[360, 592]],
+      "physicalViewport": [1184, 720],
+      "logicalViewports": [[592, 360]],
       "presentations": ["native"],
       "rasterDensity": 2
     }

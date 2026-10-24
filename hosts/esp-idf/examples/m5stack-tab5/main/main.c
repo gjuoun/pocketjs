@@ -99,8 +99,8 @@ typedef struct {
   uint32_t scale;
   /* The picture's size and top-left corner on the screen as the picture is
    * oriented (1280x720 for landscape), in panel pixels. A picture smaller
-   * than the screen sits at the top, centered across, with the home button
-   * in the space left below or beside it. */
+   * than the screen sits in the top-left corner, with the home button in the
+   * space left below or right of it. */
   uint32_t picture_width;
   uint32_t picture_height;
   uint32_t origin_x;
@@ -674,6 +674,7 @@ static void start_lane(tab5_lane_t *lane, uint32_t scale, size_t strip_bytes) {
 
 
 
+
 static void run_app(void *unused) {
   static tab5_host_t host;
   const pocketjs_package_host_contract_t *contract =
@@ -697,7 +698,7 @@ static void run_app(void *unused) {
   assert(host.scale >= 1U);
   host.picture_width = picture_width * host.scale;
   host.picture_height = picture_height * host.scale;
-  host.origin_x = (screen_width - host.picture_width) / 2U;
+  host.origin_x = 0U;
   host.origin_y = 0U;
 
   pocketjs_package_t *package = NULL;
