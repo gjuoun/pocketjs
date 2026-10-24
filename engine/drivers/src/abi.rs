@@ -801,6 +801,8 @@ pub fn pocket_runtime_complete_presentation(runtime: *mut PocketRuntime) -> i32;
 pub fn pocket_runtime_supports_op(runtime: *const PocketRuntime, op: u16) -> u32;
     /// Generated bindings use this operation dispatcher. out bytes expire at the next call on runtime.
 pub fn pocket_runtime_op(runtime: *mut PocketRuntime, op: u16, args: *const c_void, length: usize, out: *mut PocketResult) -> i32;
+    /// Overwrite the rectangle of a live 16- or 32-bit texture in place with width*height texels in its format, rows packed: the handle and the nodes drawing it stay, and the next frame repaints only the quads that sample it. Not during a guest callback; INVALID for a stale handle, an indexed texture, a rectangle outside the texture or another byte count.
+pub fn pocket_runtime_update_texture(runtime: *mut PocketRuntime, handle: i32, x: u32, y: u32, width: u32, height: u32, pixels: *const u8, length: usize) -> i32;
     pub fn pocket_runtime_destroy(runtime: *mut PocketRuntime) -> ();
     /// Software fallback after accelerator completion and cache visibility, within target's acquired region.
 pub fn pocket_raster_draw_op(target: *mut PocketSurface, op: *const PocketDrawOp, resources: *const PocketRenderResources) -> i32;

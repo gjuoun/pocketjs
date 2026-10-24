@@ -837,6 +837,9 @@ impl RenderResources for FrameResources<'_> {
     fn raster_revision(&self) -> u64 {
         self.source.raster_revision()
     }
+    fn resource_revision(&self) -> u64 {
+        self.source.resource_revision()
+    }
     fn texture(&self, handle: i32) -> Option<TexView<'_>> {
         let view = self.source.texture(handle);
         if let (Some(_), Some(log)) = (view.as_ref(), self.log) {

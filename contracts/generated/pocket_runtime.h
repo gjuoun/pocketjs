@@ -634,6 +634,9 @@ uint32_t pocket_runtime_supports_op(const pocket_runtime * runtime, uint16_t op)
 /* Generated bindings use this operation dispatcher. out bytes expire at the next call on runtime. */
 int32_t pocket_runtime_op(pocket_runtime * runtime, uint16_t op, const void * args, size_t length, pocket_result * out);
 
+/* Overwrite the rectangle of a live 16- or 32-bit texture in place with width*height texels in its format, rows packed: the handle and the nodes drawing it stay, and the next frame repaints only the quads that sample it. Not during a guest callback; INVALID for a stale handle, an indexed texture, a rectangle outside the texture or another byte count. */
+int32_t pocket_runtime_update_texture(pocket_runtime * runtime, int32_t handle, uint32_t x, uint32_t y, uint32_t width, uint32_t height, const uint8_t * pixels, size_t length);
+
 void pocket_runtime_destroy(pocket_runtime * runtime);
 
 /* Software fallback after accelerator completion and cache visibility, within target's acquired region. */
