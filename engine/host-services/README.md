@@ -13,13 +13,16 @@ every host implements once.
 | `fs.c`, `fs.h` | `contracts/spec/fs.ts` | One guest's `data.fs` tree: the nine ops, quota, and replacement of a file on FAT, which refuses a rename onto an existing name. |
 | `jscan.c`, `jscan.h` | | A bounded JSON reader and a growable JSON writer for the host's own records. |
 | `sha256.c`, `sha256.h` | | SHA-256, HMAC-SHA256, hex, and the slot of an app id (the first 16 hex digits of SHA-256 of the id). |
+| `photos_image.c`, `photos_image.h` | `contracts/spec/camera.ts` | DCF photo names, RGB565 to RGB888 for the encoder, and the box-filtered thumbnail and full view in `PSM_5650`. Each host brings its own JPEG codec. |
+| `media_wire.h`, `media_adpcm.h` | `contracts/spec/media.ts`, `contracts/spec/media-adpcm.ts` | The media stream's header and packet layouts, PAL8 frame expansion, and the IMA ADPCM block decoder. |
+| `quirc/` | | QR-code recognition, vendored unmodified (`quirc/VENDORED.txt`). |
 
 ## Hosts
 
 | Host | Build | `host_services.h` implementation |
 | --- | --- | --- |
 | Nintendo 3DS | `hosts/3ds/Makefile` (`SHARED`) | `hosts/3ds/src/services_host.c`: libctru clocks and `ps:ps` randomness, the CFG owner name, `soc:U`, the SD card runtime slots (`runtime.c`), the agent channel (`agent.c`) |
-| ESP-IDF | `hosts/esp-idf/components/pocketjs_system` | `src/services_host.c` in that component: `esp_timer`, `esp_fill_random`, lwIP, the `/pocket` store |
+| ESP-IDF | `hosts/esp-idf/components/pocketjs_system`, `pocketjs_camera`, `pocketjs_media` | `src/services_host.c` in `pocketjs_system`: `esp_timer`, `esp_fill_random`, lwIP, the `/pocket` store; the camera and media components compile the photo, QR and media sources |
 
 The build machine compiles `fs.c`, `jscan.c`, `link_proto.c` and `sha256.c`
 in `tests/fs-3ds.test.ts`, `tests/3ds-link.test.ts` and
