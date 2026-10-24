@@ -37,6 +37,8 @@
 #define WIFI_RETRIES 3
 /* RSSI is read over the coprocessor link; one read serves this long. */
 #define WIFI_RSSI_MS 2000
+/* The radio worker wakes this often for the calls that go over the link. */
+#define WIFI_POLL_MS 200
 
 static const char *TAG = "pocketjs_wifi";
 
@@ -64,6 +66,10 @@ static int64_t rssi_read_us;
 static char address[16];
 static char error[96];
 static bool scanning;
+/* Work for the radio worker: a scan to start, a finished scan to collect. */
+static bool scan_requested;
+static bool scan_done;
+static wifi_ap_record_t scan_records[24];
 static FoundNetwork networks[WIFI_MAX_NETWORKS];
 static size_t network_count;
 static SavedNetwork saved[WIFI_SLOTS];
@@ -226,12 +232,15 @@ static const char *reason_text(uint8_t reason) {
   }
 }
 
+/* Fetch a finished scan's records over the link, then fold them into the
+ * network list under the lock. */
 static void collect_scan(void) {
   uint16_t count = 0;
   esp_wifi_scan_get_ap_num(&count);
   if (count > 24) count = 24;
-  wifi_ap_record_t records[24];
+  wifi_ap_record_t *records = scan_records;
   if (esp_wifi_scan_get_ap_records(&count, records) != ESP_OK) count = 0;
+  take();
   network_count = 0;
   for (uint16_t i = 0; i < count; i += 1) {
     const char *ssid = (const char *)records[i].ssid;
@@ -259,6 +268,45 @@ static void collect_scan(void) {
       }
     }
   }
+  scanning = false;
+  give();
+}
+
+/* Calls over the coprocessor link block for up to a second and need a
+ * deep stack: the worker makes them, never the guest's frame or the event
+ * loop's task. */
+static void poll_radio(void *argument) {
+  (void)argument;
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(WIFI_POLL_MS));
+    take();
+    const bool start_scan = scan_requested;
+    const bool finish_scan = scan_done;
+    const bool read_rssi = state == WIFI_CONNECTED && esp_timer_get_time() - rssi_read_us > WIFI_RSSI_MS * 1000;
+    scan_requested = false;
+    scan_done = false;
+    give();
+    if (start_scan) {
+      wifi_scan_config_t config;
+      memset(&config, 0, sizeof config);
+      const bool started = esp_wifi_scan_start(&config, false) == ESP_OK;
+      take();
+      if (!started) {
+        scanning = false;
+        snprintf(error, sizeof error, "The scan did not start");
+      }
+      give();
+    }
+    if (finish_scan) collect_scan();
+    if (read_rssi) {
+      wifi_ap_record_t record;
+      const bool read = esp_wifi_sta_get_ap_info(&record) == ESP_OK;
+      take();
+      if (read) rssi = record.rssi;
+      rssi_read_us = esp_timer_get_time();
+      give();
+    }
+  }
 }
 
 static void on_event(void *argument, esp_event_base_t base, int32_t id, void *data) {
@@ -271,8 +319,7 @@ static void on_event(void *argument, esp_event_base_t base, int32_t id, void *da
     state = WIFI_OFF;
     address[0] = '\0';
   } else if (base == WIFI_EVENT && id == WIFI_EVENT_SCAN_DONE) {
-    collect_scan();
-    scanning = false;
+    scan_done = true;
   } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
     const wifi_event_sta_disconnected_t *event = data;
     address[0] = '\0';
@@ -352,6 +399,7 @@ void wifi_start(esp_err_t (*prepare)(void)) {
   if (lock != NULL) return;
   lock = xSemaphoreCreateMutex();
   xTaskCreate(bring_up, "pocketjs_wifi", 6 * 1024, (void *)prepare, 3, NULL);
+  xTaskCreate(poll_radio, "pocketjs_radio", 8 * 1024, NULL, 2, NULL);
 }
 
 static void status_network(JsonBuffer *out, const char *ssid, int strength, bool secure) {
@@ -365,11 +413,6 @@ static void status_network(JsonBuffer *out, const char *ssid, int strength, bool
 const char *wifi_status_json(void) {
   if (lock == NULL) return "{\"state\":\"off\",\"ssid\":\"\",\"strength\":0,\"address\":\"\",\"saved\":[],\"error\":\"\"}";
   take();
-  if (state == WIFI_CONNECTED && esp_timer_get_time() - rssi_read_us > WIFI_RSSI_MS * 1000) {
-    wifi_ap_record_t record;
-    if (esp_wifi_sta_get_ap_info(&record) == ESP_OK) rssi = record.rssi;
-    rssi_read_us = esp_timer_get_time();
-  }
   static const char *const NAMES[] = { "off", "idle", "connecting", "connected" };
   JsonBuffer *out = &status_out;
   jbuf_reset(out);
@@ -437,15 +480,12 @@ bool wifi_scan(void) {
   take();
   bool ok = ready && state != WIFI_OFF;
   if (!ok) snprintf(error, sizeof error, "Wi-Fi is off");
+  if (ok) {
+    scanning = true;
+    scan_requested = true;
+  }
   give();
-  if (!ok) return false;
-  wifi_scan_config_t config;
-  memset(&config, 0, sizeof config);
-  if (esp_wifi_scan_start(&config, false) != ESP_OK) return false;
-  take();
-  scanning = true;
-  give();
-  return true;
+  return ok;
 }
 
 bool wifi_join(const char *ssid, size_t ssid_length, const char *passphrase, size_t passphrase_length) {

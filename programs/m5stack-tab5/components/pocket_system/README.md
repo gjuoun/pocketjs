@@ -52,4 +52,9 @@ and boots it.
 The radio keeps three saved networks in NVS (namespace `pocketwifi`), joins
 the most recently used at start, and saves a joined network once it has an
 address. Storage and NVS are flash, so every call runs on one task with an
-internal stack while the guest's task waits.
+internal stack while the guest's task waits. A scan start, a scan result and
+an RSSI read each cross the SDIO link to the ESP32-C6 and wait for its answer:
+the `pocketjs_radio` task (8 KB, internal RAM) makes those calls, a scan when
+the guest asked for one (`scan_requested`, `scan_done`) and the RSSI read on
+an interval while connected; `status` answers from the cached state without
+touching the link.
