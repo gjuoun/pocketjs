@@ -180,6 +180,9 @@ failed:
   pocket_guest_idf_destroy(guest);
   return NULL;
 }
+JSContext *pocket_guest_idf_context(pocket_guest_idf *guest) {
+  return guest ? guest->context : NULL;
+}
 static int32_t initialize(void *opaque, pocket_runtime *runtime,
                           const pocket_guest_environment *environment) {
   pocket_guest_idf *guest = opaque;
