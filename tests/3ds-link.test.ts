@@ -1,4 +1,4 @@
-// The socket-free half of the 3DS Pocket Link client (hosts/3ds/src/
+// The socket-free half of the Pocket Link client (engine/host-services/
 // link_proto.c, sha256.c, jscan.c) and the vendored QR decoder, compiled for
 // the build machine and checked against the contract (contracts/spec/link.ts)
 // and the companion's own codec (tools/companion/protocol.ts, qr.ts): the
@@ -23,6 +23,7 @@ import { encodeQr, rasterizeQr } from "../tools/companion/qr.ts";
 
 const root = resolve(import.meta.dir, "..");
 const src = join(root, "hosts/3ds/src");
+const shared = join(root, "engine/host-services");
 
 // argv-driven probe: one command per run, one result line on stdout.
 const HARNESS = String.raw`
@@ -167,8 +168,8 @@ beforeAll(() => {
   writeFileSync(join(scratch, "harness.c"), HARNESS);
   const compile = Bun.spawnSync([
     "cc", "-std=gnu11", "-O1", "-Wall", "-Wextra", "-fsanitize=address,undefined",
-    `-I${src}`, join(scratch, "harness.c"),
-    join(src, "sha256.c"), join(src, "link_proto.c"), join(src, "jscan.c"),
+    `-I${shared}`, `-I${src}`, join(scratch, "harness.c"),
+    join(shared, "sha256.c"), join(shared, "link_proto.c"), join(shared, "jscan.c"),
     join(src, "quirc/quirc.c"), join(src, "quirc/decode.c"), join(src, "quirc/identify.c"),
     join(src, "quirc/version_db.c"), "-lm", "-o", binary,
   ]);
@@ -181,7 +182,7 @@ afterAll(() => {
 
 describe("3DS Pocket Link wire facts", () => {
   test("link_proto.h constants match contracts/spec/link.ts", () => {
-    const header = readFileSync(join(src, "link_proto.h"), "utf8");
+    const header = readFileSync(join(shared, "link_proto.h"), "utf8");
     // Each value is a literal or a product of literals, e.g. (32u * 1024u).
     const define = (name: string) => {
       const match = header.match(new RegExp(`#define ${name} ([^\\n/]+)`));

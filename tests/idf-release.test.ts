@@ -74,7 +74,7 @@ describe("ESP-IDF release integrity", () => {
   });
   test("component versions and internal dependency ranges are checked", () => {
     const names = verifyComponentVersions(root);
-    expect(names).toHaveLength(7);
+    expect(names).toHaveLength(8);
     const directory = mkdtempSync(join(tmpdir(), "pocketjs-versions-")); temporary.push(directory);
     const components = join(directory, "hosts/esp-idf/components");
     mkdirSync(components, { recursive: true });

@@ -25,11 +25,12 @@ describe("Nintendo 3DS Pocket Runtime storage", () => {
       "-DPOCKETJS_HOST_ABI=8",
       `-I${join(ROOT, "hosts/3ds/include")}`,
       `-I${join(ROOT, "hosts/3ds/src")}`,
+      `-I${join(ROOT, "engine/host-services")}`,
       join(ROOT, "tests/fixtures/3ds-runtime-state.c"),
       join(ROOT, "hosts/3ds/src/runtime.c"),
       // runtime_slot_remove deletes a slot with fs.c's tree removal.
-      join(ROOT, "hosts/3ds/src/fs.c"),
-      join(ROOT, "hosts/3ds/src/jscan.c"),
+      join(ROOT, "engine/host-services/fs.c"),
+      join(ROOT, "engine/host-services/jscan.c"),
       "-o",
       binary,
     ]);

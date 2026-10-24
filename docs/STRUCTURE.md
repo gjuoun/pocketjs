@@ -15,6 +15,7 @@ pocketjs/
 │  ├─ wasm/       core compiled to wasm32 for web/sim hosts (standalone crate)
 │  ├─ ui-cabi/    no_std UI C ABI: software raster + GLES1/GLES2 backends (standalone crate)
 │  ├─ quickjs-c/  portable QuickJS guest driver used by native C hosts
+│  ├─ host-services/ portable C host services (Pocket Link, launcher, data.fs) for native C hosts
 │  ├─ ios/        iOS C ABI and UIKit PocketSurfaceView
 │  ├─ pocket3d/   the 3D core family (bsp, cook, gu, vita, GLES2) + desktop examples
 │  ├─ crates/     non-3D engine crates: pocket-mod, pocket-ui-surface, pocket-ui-wgpu, pocket-vrm, pocket-widget
