@@ -54,8 +54,10 @@ When one answers at boot the input source declares the TEXT class and the
 profile's `input.text` holds: each poll drains the keyboard's character
 events into `pocket_text_event` records, a character as a commit and a named
 key as a down and up pair named as `KeyboardEvent.key` names it (`Enter`,
-`Backspace`, `ArrowLeft`, `Control+z` with Ctrl held). The keyboard keeps its
-own Sym and Aa layers.
+`Backspace`, `ArrowLeft`). The keyboard keeps its own Sym and Aa layers. Its
+firmware 1 reports Ctrl in every event once the key was pressed and never
+clears it, so the program reads no modifier from it; `Control+z` waits for
+a firmware that releases the key.
 
 The runner's task and the application task that boots the runtime each hold
 a 192 KB stack in PSRAM (`task_stack_caps`), with the QuickJS stack limit at

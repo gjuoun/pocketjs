@@ -164,7 +164,11 @@ size_t tab5_keyboard_poll(pocket_text_event *events, size_t capacity,
     uint8_t packet[17];
     if (!read_registers(REG_CHAR_EVENT, packet, length))
       break;
-    const uint8_t modifier = packet[0];
+    /* The event's first byte carries the Ctrl and Alt state, but keyboard
+     * firmware 1 keeps Ctrl set in every event once the key was pressed
+     * (its release never clears it), so the byte says nothing. Until a
+     * firmware releases it, every press is plain. */
+    const uint8_t modifier = 0;
     char name[16];
     memcpy(name, packet + 1, length - 1U);
     name[length - 1U] = '\0';
