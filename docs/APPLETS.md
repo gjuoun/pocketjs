@@ -1,7 +1,7 @@
 # Pocket Applets
 
 A **Pocket Applet** is a Pocket app that a launcher runs on behalf of the
-system: Pocket Home on the 3DS runs Hacker News, YouTube, X, Discord and
+system: Pocket Shell on the 3DS runs Hacker News, YouTube, X, Discord and
 Pocket Nexus as applets. An applet declares the manifest section `applet` and
 accepts rules a general app does not, so that one package runs on every
 launcher host, the system agent can read and operate it, and a generated
