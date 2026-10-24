@@ -49,6 +49,10 @@ static const char *TAG = "pocketjs_tab5";
 #define TAB5_MIN_DIRECT_ROWS 32U
 /* Event bit set once the frame's motion has moved its pixels. */
 #define TAB5_MOVED_BIT BIT0
+/* The PPA stops completing 90-degree presents of blocks 4 or 6 raster rows
+ * tall while the panel scans out (measured on ESP32-P4 rev 1.3; 2 and 8 to
+ * 28 rows complete), so no turned strip is shorter than this. */
+#define TAB5_MIN_TURNED_ROWS 8U
 /* The home button drawn below a picture shorter than the screen (or beside
  * one narrower than it): a square of oriented screen pixels, and the SELECT
  * bit it sends. */
@@ -62,7 +66,6 @@ typedef struct {
   pocketjs_rgb565_renderer_t *renderer;
   const pocketjs_rgb565_accelerator_t *accelerator;
   ppa_client_handle_t present;
-  async_memcpy_handle_t copy;
   uint16_t *strips[2];
   SemaphoreHandle_t idle[2];
   uint32_t next_strip;
@@ -74,6 +77,9 @@ typedef struct {
   pocketjs_rgb565_target_t *target;
   uint16_t *framebuffer;
   tab5_lane_t lanes[2];
+  /* One DMA channel presents both lanes' full-width strips: the chip has
+   * three AXI channel pairs, and the third stays free for the SPI bus. */
+  async_memcpy_handle_t copy;
   /* Strips of the frame being drawn; both lanes claim them in order. */
   const pocketjs_ui_frame_view_t *frame;
   pocketjs_rgb565_rect_t strips[TAB5_MAX_STRIPS];
@@ -332,7 +338,7 @@ static esp_err_t copy_rows_down(tab5_host_t *host, uint32_t y0, uint32_t y1,
                                 uint32_t dy) {
   const size_t row_bytes = BSP_LCD_H_RES * sizeof(uint16_t);
   uint16_t *framebuffer = host->framebuffer;
-  async_memcpy_handle_t writer = host->lanes[1].copy;
+  async_memcpy_handle_t writer = host->copy;
   const uint32_t band_rows = TAB5_STRIP_BYTES / row_bytes;
   const uint32_t count = (y1 - y0 + band_rows - 1U) / band_rows;
   uint32_t reads = 0;
@@ -462,7 +468,7 @@ static esp_err_t present_strip(tab5_host_t *host, tab5_lane_t *lane,
   if (!host->landscape && scale == 1U && w == width &&
       width == BSP_LCD_H_RES) {
     /* A full-width portrait strip is one contiguous run of panel rows. */
-    return esp_async_memcpy(lane->copy,
+    return esp_async_memcpy(host->copy,
                             host->framebuffer + (host->origin_y + y) * width,
                             lane->strips[index],
                             (size_t)w * h * sizeof(uint16_t), on_copy_done,
@@ -583,12 +589,31 @@ static esp_err_t after_turn(const pocketjs_ui_frame_view_t *frame,
         ++region.height;
       }
     }
-    const uint32_t bottom = region.y + region.height;
-    for (uint32_t y = region.y; y < bottom; y += host->strip_rows) {
+    const uint32_t turned_rows =
+        (TAB5_MIN_TURNED_ROWS + frame->raster_density - 1U) /
+        frame->raster_density;
+    if (host->landscape && region.height < turned_rows) {
+      if (region.y + turned_rows > frame->logical_height)
+        region.y = frame->logical_height - turned_rows;
+      region.height = turned_rows;
+    }
+    /* Landscape strips share the region's rows evenly, so the last one is
+     * not a short remainder; a landscape logical row is a whole number of
+     * cache lines, so any count is aligned. */
+    const uint32_t count =
+        (region.height + host->strip_rows - 1U) / host->strip_rows;
+    uint32_t y = region.y;
+    for (uint32_t strip = 0; strip < count; ++strip) {
       pocketjs_rgb565_rect_t rect = region;
       rect.y = y;
-      rect.height = bottom - y < host->strip_rows ? bottom - y : host->strip_rows;
+      rect.height =
+          host->landscape
+              ? region.height / count + (strip < region.height % count ? 1U : 0U)
+              : (region.y + region.height - y < host->strip_rows
+                     ? region.y + region.height - y
+                     : host->strip_rows);
       host->strips[host->strip_count++] = rect;
+      y += rect.height;
     }
   }
   esp_err_t result = ESP_OK;
@@ -661,10 +686,6 @@ static void start_lane(tab5_lane_t *lane, uint32_t scale, size_t strip_bytes) {
   };
   ESP_ERROR_CHECK(
       ppa_client_register_event_callbacks(lane->present, &present_callbacks));
-  async_memcpy_config_t copy_config = ASYNC_MEMCPY_DEFAULT_CONFIG();
-  copy_config.backlog = 2;
-  copy_config.dma_burst_size = 64;
-  ESP_ERROR_CHECK(esp_async_memcpy_install_gdma_axi(&copy_config, &lane->copy));
   for (size_t index = 0; index < 2U; ++index) {
     lane->strips[index] = heap_caps_aligned_alloc(
         128, strip_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
@@ -709,6 +730,10 @@ static void run_app(void *unused) {
   assert(8U * ((picture_height / contract->raster_density + host.strip_rows -
                 1U) /
                host.strip_rows) <= TAB5_MAX_STRIPS);
+  async_memcpy_config_t copy_config = ASYNC_MEMCPY_DEFAULT_CONFIG();
+  copy_config.backlog = 4;
+  copy_config.dma_burst_size = 64;
+  ESP_ERROR_CHECK(esp_async_memcpy_install_gdma_axi(&copy_config, &host.copy));
   start_lane(&host.lanes[0], contract->raster_density, TAB5_STRIP_BYTES);
   start_lane(&host.lanes[1], contract->raster_density, TAB5_STRIP_BYTES);
 
