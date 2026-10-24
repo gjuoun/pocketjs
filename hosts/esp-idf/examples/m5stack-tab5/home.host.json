@@ -6,15 +6,15 @@
   "form": "takeover",
   "tickHz": 30,
   "display": {
-    "physicalViewport": [800, 480],
+    "physicalViewport": [400, 240],
     "logicalViewports": [[400, 240]],
     "presentations": ["native"],
-    "rasterDensity": 2,
+    "rasterDensity": 1,
     "auxiliary": {
-      "physicalViewport": [1184, 720],
+      "physicalViewport": [592, 360],
       "logicalViewports": [[592, 360]],
       "presentations": ["native"],
-      "rasterDensity": 2
+      "rasterDensity": 1
     }
   },
   "capabilities": [
