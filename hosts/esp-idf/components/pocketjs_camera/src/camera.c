@@ -53,6 +53,10 @@
 #define CAMERA_FRAME_BYTES (CAMERA_WIDTH * CAMERA_HEIGHT * 2u)
 /* Four decode passes a second find a code held in front of the lens. */
 #define CAMERA_SCAN_MS 250u
+/* The viewfinder shows every second sensor frame (15 of 30 a second): a
+ * preview costs PPA and PSRAM time the UI's 33 ms frame needs for its own
+ * presents. */
+#define CAMERA_PREVIEW_DIVIDER 2u
 /* One buffer the PPA writes, the newest complete one, and the one the owner
  * task is reading. */
 #define CAMERA_BUFFERS 3
@@ -306,6 +310,7 @@ static void capture_run(void *argument) {
              (double)preview.scale);
   }
   int writing = 0;
+  uint32_t sensor_frames = 0;
   while (atomic_load(&capture_state) == CAPTURE_RUNNING &&
          !atomic_load(&stopping)) {
     struct v4l2_buffer buffer = {.type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
@@ -316,10 +321,11 @@ static void capture_run(void *argument) {
     }
     const void *frame = buffers[buffer.index];
     const int32_t job = atomic_exchange(&still_wanted, 0);
+    const bool shown = sensor_frames++ % CAMERA_PREVIEW_DIVIDER == 0;
     if ((buffer.flags & V4L2_BUF_FLAG_ERROR) == 0) {
       if (job != 0)
         take_still(client, frame, width, height, job);
-      writing = pick_write_buffer(writing);
+      writing = shown ? pick_write_buffer(writing) : -1;
       if (writing >= 0 &&
           transform(client, frame, width, height, &preview, previews[writing],
                     CAMERA_WIDTH, CAMERA_HEIGHT,

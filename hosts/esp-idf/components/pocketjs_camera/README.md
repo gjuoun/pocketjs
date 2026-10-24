@@ -9,9 +9,12 @@ the camera.qr viewfinder with QR decoding and the camera.photo store.
 
 The board supplies the sensor's V4L2 device, a hook that starts the sensor,
 the sensor's rotation and the storage directory. A capture task streams
-RGB565 from the ISP and the PPA turns each frame into a 320x240 PSM_5650
-preview: **a centered 4:3 crop scaled by a sixteenth-step factor, rotated
-upright and mirrored for the inner flag**. The owner task copies the newest
+RGB565 from the ISP and the PPA turns every second frame into a 320x240
+PSM_5650 preview: **a centered 4:3 crop scaled by a sixteenth-step factor,
+rotated upright and mirrored for the inner flag**. On the Tab5 a 15 fps
+preview keeps a 30 fps UI at 14.6 ms a frame on average and 25.5 ms at most;
+a preview every sensor frame took 33.2 ms on average, the whole frame
+budget. The owner task copies the newest
 preview into one 512x256 core texture between turns
 (`pocketjs_camera_present`), so the guest draws an ordinary image handle. A
 decode task runs quirc (`engine/host-services/quirc`) on the preview's luma
