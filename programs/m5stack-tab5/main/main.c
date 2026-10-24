@@ -5,8 +5,10 @@
  *
  * With TAB5_LAUNCHER the embedded application is Pocket Home: the firmware
  * keeps a store of installed apps (pocket_system), switches between them,
- * and floats a home ball over the picture that sends SELECT (or summons the
- * launcher from an app). */
+ * and floats a home ball over the picture: a tap sends SELECT (or summons
+ * the launcher from an app), a finger that moves at once drags the ball, a
+ * finger that rests on it and then slides makes a gesture named by its
+ * direction. A Tab5 keyboard on Ext.Port1 sends text events. */
 #include <assert.h>
 #include <inttypes.h>
 #include <math.h>
@@ -38,6 +40,7 @@
 #include "pocketjs/esp32p4_ppa_status.h"
 #include "pocketjs_package_app.h"
 #include "tab5_camera_media.h"
+#include "tab5_keyboard.h"
 
 #ifndef TAB5_LAUNCHER
 #define TAB5_LAUNCHER 0
@@ -74,6 +77,15 @@ static const char *TAG = "pocketjs_tab5";
  * release. */
 #define TAB5_BALL_SIZE 56U
 #define TAB5_BALL_INSET 8U
+/* A finger on the ball that moves this far (logical px) within this many
+ * polls drags it; one that rests longer first and then travels
+ * TAB5_BALL_SWIPE makes a gesture. */
+#define TAB5_BALL_SLOP 6.0f
+#define TAB5_BALL_HOLD_FRAMES 10U
+#define TAB5_BALL_SWIPE 24.0f
+/* Text events a poll forwards from the keyboard, and their names. */
+#define TAB5_TEXT_EVENTS 16U
+#define TAB5_TEXT_BYTES 192U
 /* Where the launcher keeps installed apps: the microSD card when one is in
  * the slot, the `storage` flash partition otherwise. */
 #define TAB5_STORE "/pocket"
@@ -129,7 +141,17 @@ typedef struct {
   uint32_t ball_px;
   uint32_t *ball_faces[2];
   bool ball_pressed;
-  bool ball_released;
+  /* The finger on the ball: its contact id (-1 none), where it landed
+   * relative to the ball, where it landed and last was, the polls it has
+   * stayed, and what it is doing (0 resting, 1 dragging, 2 gesturing). */
+  int32_t ball_contact;
+  float ball_grab_x, ball_grab_y;
+  float ball_down_x, ball_down_y;
+  float ball_last_x, ball_last_y;
+  uint32_t ball_frames;
+  uint8_t ball_mode;
+  /* The keyboard on Ext.Port1, when one answered at boot. */
+  bool keyboard;
   uint32_t contacts[TAB5_MAX_CONTACTS];
   uint32_t contact_count;
   tab5_guest_t running;
@@ -237,14 +259,44 @@ static void show_ball(tab5_host_t *host) {
 /* ---- input --------------------------------------------------------------- */
 
 static uint32_t input_classes(void *context) {
-  (void)context;
+  const tab5_host_t *host = context;
   return POCKET_INPUT_CLASS_CONTACT |
-         (TAB5_LAUNCHER ? POCKET_INPUT_CLASS_BUTTONS : 0U);
+         (TAB5_LAUNCHER ? POCKET_INPUT_CLASS_BUTTONS : 0U) |
+         (host && host->keyboard ? POCKET_INPUT_CLASS_TEXT : 0U);
 }
 
-/* Contacts on the picture in logical pixels; a contact on the ball is the
- * ball's, not the picture's, and sends SELECT on release. A failed read
- * cancels the contacts the previous sample reported. */
+/* Where the ball may sit: inside the picture. */
+static void place_ball(tab5_host_t *host, float x, float y) {
+  const float max_x = (float)host->picture_width / host->unit - TAB5_BALL_SIZE;
+  const float max_y = (float)host->picture_height / host->unit - TAB5_BALL_SIZE;
+  x = x < 0.0f ? 0.0f : x > max_x ? max_x : x;
+  y = y < 0.0f ? 0.0f : y > max_y ? max_y : y;
+  const uint32_t nx = (uint32_t)(x + 0.5f);
+  const uint32_t ny = (uint32_t)(y + 0.5f);
+  if (nx == host->ball.x && ny == host->ball.y)
+    return;
+  host->ball.x = nx;
+  host->ball.y = ny;
+  show_ball(host);
+}
+
+/* A gesture the ball's finger made: where effects attach later (the
+ * assistant's voice, for one). */
+static void ball_gesture(tab5_host_t *host, float dx, float dy) {
+  (void)host;
+  if (dx * dx + dy * dy < TAB5_BALL_SWIPE * TAB5_BALL_SWIPE)
+    return;
+  const char *direction = fabsf(dx) > fabsf(dy) ? (dx > 0 ? "right" : "left")
+                                                : (dy > 0 ? "down" : "up");
+  ESP_LOGI(TAG, "ball gesture: %s", direction);
+}
+
+/* Contacts on the picture in logical pixels; a contact that lands on the
+ * ball is the ball's until it lifts, never the picture's: a tap sends
+ * SELECT on release, a finger that moves at once drags the ball, one that
+ * rested first makes a gesture. The keyboard's presses follow as text
+ * events. A failed read cancels the contacts the previous sample
+ * reported. */
 static int32_t input_poll(void *context, pocket_input_frame_builder *builder) {
   tab5_host_t *host = context;
   if (!host || !builder || builder->struct_size < sizeof(*builder) ||
@@ -260,7 +312,9 @@ static int32_t input_poll(void *context, pocket_input_frame_builder *builder) {
   pocket_cancelled_contact cancelled[TAB5_MAX_CONTACTS];
   size_t contact_count = 0;
   size_t cancelled_count = 0;
-  bool on_ball_now = false;
+  bool ball_held = false;
+  float ball_x = 0.0f;
+  float ball_y = 0.0f;
   if (!read) {
     for (uint32_t i = 0; i < host->contact_count; i++)
       cancelled[cancelled_count++] = (pocket_cancelled_contact){
@@ -283,33 +337,83 @@ static int32_t input_poll(void *context, pocket_input_frame_builder *builder) {
                                     .id = points[i].track_id,
                                     .x = (float)x / host->unit,
                                     .y = (float)y / host->unit};
-    if (host->ball_faces[0] && on_ball(host, contact.x, contact.y)) {
-      on_ball_now = true;
-      continue;
+    if (host->ball_faces[0]) {
+      if (host->ball_contact == (int32_t)contact.id) {
+        ball_held = true;
+        ball_x = contact.x;
+        ball_y = contact.y;
+        continue;
+      }
+      if (host->ball_contact < 0 && !ball_held &&
+          on_ball(host, contact.x, contact.y)) {
+        host->ball_contact = (int32_t)contact.id;
+        host->ball_grab_x = contact.x - (float)host->ball.x;
+        host->ball_grab_y = contact.y - (float)host->ball.y;
+        host->ball_down_x = host->ball_last_x = contact.x;
+        host->ball_down_y = host->ball_last_y = contact.y;
+        host->ball_frames = 0;
+        host->ball_mode = 0;
+        ball_held = true;
+        ball_x = contact.x;
+        ball_y = contact.y;
+        continue;
+      }
     }
     contacts[contact_count++] = contact;
   }
-  /* The ball acts on release, like a key: one tick of SELECT. Outside the
-   * launcher it summons the launcher instead. */
-  uint32_t buttons = host->ball_released ? POCKET_BUTTON_SELECT : 0U;
+  uint32_t buttons = 0U;
+  /* A failed read says nothing about the finger on the ball. */
+  if (host->ball_contact >= 0 && read) {
+    if (ball_held) {
+      ++host->ball_frames;
+      const float dx = ball_x - host->ball_down_x;
+      const float dy = ball_y - host->ball_down_y;
+      if (host->ball_mode == 0 &&
+          dx * dx + dy * dy > TAB5_BALL_SLOP * TAB5_BALL_SLOP)
+        host->ball_mode = host->ball_frames > TAB5_BALL_HOLD_FRAMES ? 2 : 1;
+      if (host->ball_mode == 1)
+        place_ball(host, ball_x - host->ball_grab_x, ball_y - host->ball_grab_y);
+      host->ball_last_x = ball_x;
+      host->ball_last_y = ball_y;
+    } else {
+      /* The finger lifted: a tap acts on release, like a key, one tick of
+       * SELECT; a rest that never moved is nothing. */
+      if (host->ball_mode == 0 && host->ball_frames <= TAB5_BALL_HOLD_FRAMES)
+        buttons = POCKET_BUTTON_SELECT;
+      else if (host->ball_mode == 2)
+        ball_gesture(host, host->ball_last_x - host->ball_down_x,
+                     host->ball_last_y - host->ball_down_y);
+      host->ball_contact = -1;
+      host->ball_mode = 0;
+    }
+  }
+  /* Outside the launcher SELECT summons the launcher instead. */
 #if TAB5_LAUNCHER
   if (buttons != 0U && !pocketjs_system_launcher_running()) {
     pocketjs_system_summon();
     buttons = 0U;
   }
 #endif
-  host->ball_released = host->ball_pressed && !on_ball_now;
-  if (on_ball_now != host->ball_pressed) {
-    host->ball_pressed = on_ball_now;
+  const bool pressed = host->ball_contact >= 0;
+  if (pressed != host->ball_pressed) {
+    host->ball_pressed = pressed;
     show_ball(host);
   }
+  pocket_text_event text[TAB5_TEXT_EVENTS];
+  char text_bytes[TAB5_TEXT_BYTES];
+  const size_t text_count =
+      host->keyboard
+          ? tab5_keyboard_poll(text, TAB5_TEXT_EVENTS, text_bytes, sizeof text_bytes)
+          : 0;
   const pocket_input_frame frame = {
       .struct_size = sizeof(frame),
       .buttons = buttons,
       .contacts = contact_count ? contacts : NULL,
       .contact_count = contact_count,
       .cancelled = cancelled_count ? cancelled : NULL,
-      .cancelled_count = cancelled_count};
+      .cancelled_count = cancelled_count,
+      .text = text_count ? text : NULL,
+      .text_count = text_count};
   const int32_t result = builder->append(builder->context, &frame);
   if (result == POCKET_STATUS_OK) {
     host->contact_count = contact_count;
@@ -471,6 +575,8 @@ static void start_panel(tab5_host_t *host) {
   ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(lcd.panel, true));
   ESP_ERROR_CHECK(bsp_display_backlight_on());
   ESP_ERROR_CHECK(bsp_touch_new(NULL, &host->touch));
+  host->keyboard = tab5_keyboard_start();
+  host->ball_contact = -1;
 }
 
 /* ---- the runner ------------------------------------------------------------ */

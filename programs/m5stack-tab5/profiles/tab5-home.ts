@@ -4,7 +4,8 @@ import { defineProfile } from "@pocketjs/framework/profile";
  * Pocket Home and its applets on the Tab5 held in landscape. The picture is
  * the auxiliary surface, 640x360 at raster density 1, which the program
  * presents at 2x over the whole 1280x720 screen; the primary surface stays
- * off screen. A home control the program draws sends SELECT.
+ * off screen. A home control the program draws sends SELECT; the Tab5
+ * keyboard on Ext.Port1, when one is attached, sends text events.
  */
 export default defineProfile({
   id: "tab5-home",
@@ -25,6 +26,7 @@ export default defineProfile({
   },
   capabilities: [
     "input.buttons",
+    "input.text",
     "input.touch.auxiliary",
     "display.auxiliary",
     "text.glyphs.baked",
