@@ -97,6 +97,22 @@ esp_err_t pocketjs_ui_core_draw(pocketjs_ui_core_t *core,
 size_t pocketjs_ui_core_touch_hits(pocketjs_ui_core_t *core,
                                    const uint32_t *touches, size_t touch_count,
                                    int32_t *out_hits, size_t hit_capacity);
+/** The auxiliary output (`display.auxiliary`): its root node id, or 0. */
+int32_t pocketjs_ui_core_create_auxiliary_surface(pocketjs_ui_core_t *core,
+                                                  uint32_t width,
+                                                  uint32_t height);
+int32_t pocketjs_ui_core_hit_test_auxiliary(pocketjs_ui_core_t *core, float x,
+                                            float y);
+int32_t pocketjs_ui_core_hit_test_bounds_auxiliary(pocketjs_ui_core_t *core,
+                                                   float x, float y);
+/** A frame of the auxiliary surface; ESP_ERR_INVALID_STATE without one. */
+esp_err_t pocketjs_ui_core_draw_auxiliary(pocketjs_ui_core_t *core,
+                                          pocketjs_ui_frame_view_t *out_frame);
+size_t pocketjs_ui_core_touch_hits_auxiliary(pocketjs_ui_core_t *core,
+                                             const uint32_t *touches,
+                                             size_t touch_count,
+                                             int32_t *out_hits,
+                                             size_t hit_capacity);
 /** Borrowed resource views expire on the next core mutation or tick. */
 esp_err_t pocketjs_ui_core_texture(pocketjs_ui_core_t *core, int32_t handle,
                                    pocketjs_ui_texture_view_t *out_texture);

@@ -228,6 +228,37 @@ size_t pocketjs_ui_core_touch_hits(pocketjs_ui_core_t *core,
                                        capacity);
 }
 
+int32_t pocketjs_ui_core_create_auxiliary_surface(pocketjs_ui_core_t *core,
+                                                  uint32_t width,
+                                                  uint32_t height) {
+  return pocketjs_native_ui_create_auxiliary_surface(core, width, height);
+}
+
+int32_t pocketjs_ui_core_hit_test_auxiliary(pocketjs_ui_core_t *core, float x,
+                                            float y) {
+  return pocketjs_native_ui_hit_test_auxiliary(core, x, y);
+}
+
+int32_t pocketjs_ui_core_hit_test_bounds_auxiliary(pocketjs_ui_core_t *core,
+                                                   float x, float y) {
+  return pocketjs_native_ui_hit_test_bounds_auxiliary(core, x, y);
+}
+
+esp_err_t pocketjs_ui_core_draw_auxiliary(pocketjs_ui_core_t *core,
+                                          pocketjs_ui_frame_view_t *out_frame) {
+  return pocketjs_native_ui_draw_auxiliary(core, out_frame) == 0
+             ? ESP_OK
+             : ESP_ERR_INVALID_STATE;
+}
+
+size_t pocketjs_ui_core_touch_hits_auxiliary(pocketjs_ui_core_t *core,
+                                             const uint32_t *touches,
+                                             size_t touch_count,
+                                             int32_t *hits, size_t capacity) {
+  return pocketjs_native_ui_touch_hits_auxiliary(core, touches, touch_count,
+                                                 hits, capacity);
+}
+
 esp_err_t pocketjs_ui_core_texture(pocketjs_ui_core_t *core, int32_t handle,
                                    pocketjs_ui_texture_view_t *out_texture) {
   return pocketjs_native_ui_texture(core, handle, out_texture) == 0

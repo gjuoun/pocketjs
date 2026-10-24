@@ -33,6 +33,9 @@ struct pocketjs_ui_qjs {
   uint32_t tick_hz;
   uint32_t logical_width;
   uint32_t logical_height;
+  int32_t auxiliary_root;
+  uint32_t auxiliary_width;
+  uint32_t auxiliary_height;
   const uint8_t *pak;
   size_t pak_size;
   texture_registration_t *textures;
@@ -83,7 +86,8 @@ esp_err_t pocketjs_ui_qjs_create(pocketjs_guest_t *guest,
       config->struct_size < sizeof(*config) || config->target_id == NULL ||
       config->host_abi == 0U ||
       strnlen(config->target_id, TARGET_ID_BYTES) == 0U ||
-      strnlen(config->target_id, TARGET_ID_BYTES) >= TARGET_ID_BYTES) {
+      strnlen(config->target_id, TARGET_ID_BYTES) >= TARGET_ID_BYTES ||
+      (config->auxiliary_width == 0U) != (config->auxiliary_height == 0U)) {
     return ESP_ERR_INVALID_ARG;
   }
   *out_binding = NULL;
@@ -106,6 +110,17 @@ esp_err_t pocketjs_ui_qjs_create(pocketjs_guest_t *guest,
   binding->tick_hz = core_config.tick_hz;
   binding->logical_width = core_config.logical_width;
   binding->logical_height = core_config.logical_height;
+  if (config->auxiliary_width != 0U) {
+    binding->auxiliary_root = pocketjs_ui_core_create_auxiliary_surface(
+        core, config->auxiliary_width, config->auxiliary_height);
+    if (binding->auxiliary_root == 0) {
+      free(binding->target_id);
+      free(binding);
+      return ESP_ERR_INVALID_ARG;
+    }
+    binding->auxiliary_width = config->auxiliary_width;
+    binding->auxiliary_height = config->auxiliary_height;
+  }
   *out_binding = binding;
   return ESP_OK;
 }
@@ -530,6 +545,21 @@ static JSValue js_hit_test_bounds(JSContext *ctx, JSValueConst this_value,
                               UI_CORE(ctx), (float)a_f640, (float)a_f641));
 }
 
+static JSValue js_hit_test_auxiliary(JSContext *ctx, JSValueConst this_value,
+                                     int argc, JSValueConst *argv, int magic,
+                                     void *opaque) {
+  double x;
+  double y;
+  if (!arg_f64(ctx, argc, argv, 0, &x) || !arg_f64(ctx, argc, argv, 1, &y))
+    return JS_EXCEPTION;
+  (void)this_value;
+  return JS_NewInt32(
+      ctx, magic ? pocketjs_ui_core_hit_test_bounds_auxiliary(UI_CORE(ctx),
+                                                             (float)x, (float)y)
+                 : pocketjs_ui_core_hit_test_auxiliary(UI_CORE(ctx), (float)x,
+                                                       (float)y));
+}
+
 static JSValue js_set_cursor(JSContext *ctx, JSValueConst this_value, int argc,
                              JSValueConst *argv, int magic, void *opaque) {
   int32_t a_i320;
@@ -735,6 +765,15 @@ static esp_err_t install_ui(JSContext *ctx, void *user_data) {
   set_function(ctx, ui, "wrapText", js_wrap_text, 3, binding);
   set_function(ctx, ui, "freeTexture", js_free_texture, 1, binding);
   set_function(ctx, ui, "uploadImgEntry", js_upload_img_entry, 1, binding);
+  if (binding->auxiliary_root != 0) {
+    JS_SetPropertyStr(ctx, ui, "hitTestAuxiliary",
+                      JS_NewCClosure(ctx, js_hit_test_auxiliary,
+                                     "hitTestAuxiliary", NULL, 2, 0, binding));
+    JS_SetPropertyStr(ctx, ui, "hitTestBoundsAuxiliary",
+                      JS_NewCClosure(ctx, js_hit_test_auxiliary,
+                                     "hitTestBoundsAuxiliary", NULL, 2, 1,
+                                     binding));
+  }
 
   JSValue viewport = JS_NewObject(ctx);
   JS_SetPropertyStr(ctx, viewport, "w",
@@ -742,6 +781,16 @@ static esp_err_t install_ui(JSContext *ctx, void *user_data) {
   JS_SetPropertyStr(ctx, viewport, "h",
                     JS_NewUint32(ctx, binding->logical_height));
   JS_SetPropertyStr(ctx, ui, "__viewport", viewport);
+  if (binding->auxiliary_root != 0) {
+    JSValue auxiliary = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, auxiliary, "root",
+                      JS_NewInt32(ctx, binding->auxiliary_root));
+    JS_SetPropertyStr(ctx, auxiliary, "w",
+                      JS_NewUint32(ctx, binding->auxiliary_width));
+    JS_SetPropertyStr(ctx, auxiliary, "h",
+                      JS_NewUint32(ctx, binding->auxiliary_height));
+    JS_SetPropertyStr(ctx, ui, "__auxiliarySurface", auxiliary);
+  }
   JS_SetPropertyStr(ctx, ui, "__host", JS_NewString(ctx, binding->target_id));
   JS_SetPropertyStr(ctx, ui, "__hostAbi", JS_NewUint32(ctx, binding->host_abi));
   JS_SetPropertyStr(ctx, ui, "__tickHz", JS_NewUint32(ctx, binding->tick_hz));
@@ -843,11 +892,18 @@ esp_err_t pocketjs_ui_turn(pocketjs_ui_qjs_t *binding,
                          ? 0x80000000U | (id << 20U) | (y << 10U) | x
                          : (id << 18U) | (y << 9U) | x;
   }
+  const bool auxiliary = binding->auxiliary_root != 0;
   const size_t hit_count =
-      pocketjs_ui_core_touch_hits(binding->core, touches, input->touch_count,
-                                  hits, POCKETJS_UI_MAX_TOUCHES);
+      auxiliary ? pocketjs_ui_core_touch_hits_auxiliary(
+                      binding->core, touches, input->touch_count, hits,
+                      POCKETJS_UI_MAX_TOUCHES)
+                : pocketjs_ui_core_touch_hits(binding->core, touches,
+                                              input->touch_count, hits,
+                                              POCKETJS_UI_MAX_TOUCHES);
   if (hit_count != input->touch_count)
     return ESP_FAIL;
+  static const uint8_t on_auxiliary[POCKETJS_UI_MAX_TOUCHES] = {
+      1, 1, 1, 1, 1, 1, 1, 1};
   const pocketjs_guest_frame_t frame = {
       .struct_size = sizeof(frame),
       .buttons = input->buttons,
@@ -856,12 +912,14 @@ esp_err_t pocketjs_ui_turn(pocketjs_ui_qjs_t *binding,
       .touches = touches,
       .touch_hits = hits,
       .touch_count = input->touch_count,
+      .touch_surfaces = auxiliary ? on_auxiliary : NULL,
   };
   esp_err_t result = pocketjs_guest_frame(binding->guest, &frame);
   if (result != ESP_OK)
     return result;
   pocketjs_ui_core_tick(binding->core);
-  return pocketjs_ui_core_draw(binding->core, out_frame);
+  return auxiliary ? pocketjs_ui_core_draw_auxiliary(binding->core, out_frame)
+                   : pocketjs_ui_core_draw(binding->core, out_frame);
 }
 
 uint32_t pocketjs_ui_qjs_tick_hz(const pocketjs_ui_qjs_t *binding) {

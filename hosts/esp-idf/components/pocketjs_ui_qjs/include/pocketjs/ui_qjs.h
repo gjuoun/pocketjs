@@ -24,6 +24,8 @@ typedef struct {
   uint32_t buttons;
   int16_t analog_x;
   int16_t analog_y;
+  /** Contacts in logical coordinates of the surface that takes touch: the
+   * auxiliary surface when the binding has one, the primary otherwise. */
   const pocketjs_ui_touch_t *touches;
   size_t touch_count;
 } pocketjs_ui_input_t;
@@ -32,6 +34,11 @@ typedef struct {
   size_t struct_size;
   const char *target_id;
   uint32_t host_abi;
+  /** The auxiliary surface (`display.auxiliary`) in logical px, or 0x0 for
+   * none. With one, touch lands on it and each turn draws it, not the
+   * primary surface, which stays laid out off screen. */
+  uint32_t auxiliary_width;
+  uint32_t auxiliary_height;
 } pocketjs_ui_qjs_config_t;
 
 esp_err_t pocketjs_ui_qjs_create(pocketjs_guest_t *guest,
@@ -52,7 +59,8 @@ esp_err_t pocketjs_ui_qjs_feed_pak(pocketjs_ui_qjs_t *binding, const void *pak,
  * Functions capture their binding and never use JSContext's opaque slot. */
 esp_err_t pocketjs_ui_qjs_mount(pocketjs_ui_qjs_t *binding);
 
-/** One synchronous PocketJS UI turn; no rendering or presentation occurs. */
+/** One synchronous PocketJS UI turn; no rendering or presentation occurs.
+ * The frame is the auxiliary surface's when the binding has one. */
 esp_err_t pocketjs_ui_turn(pocketjs_ui_qjs_t *binding,
                            const pocketjs_ui_input_t *input,
                            pocketjs_ui_frame_view_t *out_frame);

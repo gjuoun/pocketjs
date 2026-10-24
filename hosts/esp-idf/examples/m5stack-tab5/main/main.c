@@ -1,14 +1,17 @@
 #include <assert.h>
 #include <inttypes.h>
+#include <math.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "bsp/display.h"
 #include "bsp/touch.h"
 #include "driver/ppa.h"
 #include "esp_async_memcpy.h"
+#include "esp_cache.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_mipi_dsi.h"
@@ -45,6 +48,11 @@ static const char *TAG = "pocketjs_tab5";
 #define TAB5_MIN_DIRECT_ROWS 32U
 /* Event bit set once the frame's motion has moved its pixels. */
 #define TAB5_MOVED_BIT BIT0
+/* The home button drawn below a picture shorter than the screen (or beside
+ * one narrower than it): a square of oriented screen pixels, and the SELECT
+ * bit it sends. */
+#define TAB5_BUTTON_SIZE 88U
+#define TAB5_BUTTON_SELECT 0x0001U
 
 /* Each core runs one lane with its own renderer and PPA clients. One strip
  * renders while the other is presented; `idle` is given when a strip's
@@ -89,10 +97,128 @@ typedef struct {
   /* Panel pixels per raster pixel: 1 when the raster density fills the
    * panel, 2 for an integer-fit picture rendered at half the density. */
   uint32_t scale;
+  /* The picture's size and top-left corner on the screen as the picture is
+   * oriented (1280x720 for landscape), in panel pixels. A picture smaller
+   * than the screen sits at the top, centered across, with the home button
+   * in the space left below or beside it. */
+  uint32_t picture_width;
+  uint32_t picture_height;
+  uint32_t origin_x;
+  uint32_t origin_y;
+  uint16_t *button;
+  bool button_shown;
+  bool button_pressed;
+  bool button_released;
   int64_t frame_started;
   uint64_t frame_us;
   uint32_t frame_max_us;
 } tab5_host_t;
+
+static uint32_t oriented_height(const tab5_host_t *host) {
+  return host->landscape ? BSP_LCD_H_RES : BSP_LCD_V_RES;
+}
+
+/* The button's top-left corner on the oriented screen: centered in the space
+ * below the picture, or right of it when the picture is as tall as the
+ * screen. */
+static void home_button_origin(const tab5_host_t *host, int32_t *x, int32_t *y) {
+  const uint32_t screen_width = host->landscape ? BSP_LCD_V_RES : BSP_LCD_H_RES;
+  const uint32_t bottom = host->origin_y + host->picture_height;
+  if (bottom < oriented_height(host)) {
+    *x = (int32_t)((screen_width - TAB5_BUTTON_SIZE) / 2U);
+    *y = (int32_t)(bottom + (oriented_height(host) - bottom - TAB5_BUTTON_SIZE) / 2U);
+    return;
+  }
+  const uint32_t right = host->origin_x + host->picture_width;
+  *x = (int32_t)(right + (screen_width - right - TAB5_BUTTON_SIZE) / 2U);
+  *y = (int32_t)((oriented_height(host) - TAB5_BUTTON_SIZE) / 2U);
+}
+
+/* The whole space below (or beside) the picture answers, so a thumb need
+ * not aim. */
+static bool on_home_button(const tab5_host_t *host, int32_t x, int32_t y) {
+  if (host->origin_y + host->picture_height < oriented_height(host))
+    return y >= (int32_t)(host->origin_y + host->picture_height);
+  return x >= (int32_t)(host->origin_x + host->picture_width);
+}
+
+static uint16_t rgb565(uint32_t r, uint32_t g, uint32_t b) {
+  return (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+}
+
+/* Coverage of one pixel by the button's disc and by the rounded square
+ * drawn on it, from 4x4 samples. */
+static void button_coverage(float px, float py, float *disc, float *mark) {
+  const float center = TAB5_BUTTON_SIZE / 2.0f;
+  const float radius = 40.0f;
+  const float half = 13.0f;
+  const float corner = 5.5f;
+  const float stroke = 2.5f;
+  uint32_t in_disc = 0;
+  uint32_t in_mark = 0;
+  for (uint32_t sy = 0; sy < 4U; ++sy) {
+    for (uint32_t sx = 0; sx < 4U; ++sx) {
+      const float x = px + (sx + 0.5f) / 4.0f - center;
+      const float y = py + (sy + 0.5f) / 4.0f - center;
+      if (x * x + y * y <= radius * radius)
+        ++in_disc;
+      /* Signed distance to the rounded square's outline. */
+      const float qx = fabsf(x) - (half - corner);
+      const float qy = fabsf(y) - (half - corner);
+      const float ox = qx > 0.0f ? qx : 0.0f;
+      const float oy = qy > 0.0f ? qy : 0.0f;
+      const float inside = fminf(fmaxf(qx, qy), 0.0f);
+      const float distance = sqrtf(ox * ox + oy * oy) + inside - corner;
+      if (fabsf(distance) <= stroke / 2.0f)
+        ++in_mark;
+    }
+  }
+  *disc = in_disc / 16.0f;
+  *mark = in_mark / 16.0f;
+}
+
+/* Paint the home button in its pressed or resting state. The pixels go
+ * through the mover's PPA client, which turns them onto the portrait panel
+ * like a strip in landscape. */
+static void paint_home_button(tab5_host_t *host) {
+  const uint32_t size = TAB5_BUTTON_SIZE;
+  const float face = host->button_pressed ? 70.0f : 30.0f;
+  for (uint32_t y = 0; y < size; ++y) {
+    for (uint32_t x = 0; x < size; ++x) {
+      float disc;
+      float mark;
+      button_coverage((float)x, (float)y, &disc, &mark);
+      const float level = disc * face + mark * (142.0f - face);
+      host->button[y * size + x] = rgb565((uint32_t)level, (uint32_t)level,
+                                          (uint32_t)(level * 1.03f));
+    }
+  }
+  const size_t bytes = size * size * sizeof(uint16_t);
+  esp_cache_msync(host->button, bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+  int32_t left;
+  int32_t top;
+  home_button_origin(host, &left, &top);
+  ppa_srm_oper_config_t operation = {
+      .in = {.buffer = host->button, .pic_w = size, .pic_h = size,
+             .block_w = size, .block_h = size,
+             .srm_cm = PPA_SRM_COLOR_MODE_RGB565},
+      .out = {.buffer = host->framebuffer,
+              .buffer_size = BSP_LCD_H_RES * BSP_LCD_V_RES * sizeof(uint16_t),
+              .pic_w = BSP_LCD_H_RES, .pic_h = BSP_LCD_V_RES,
+              .block_offset_x = (uint32_t)left, .block_offset_y = (uint32_t)top,
+              .srm_cm = PPA_SRM_COLOR_MODE_RGB565},
+      .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
+      .scale_x = 1.0f,
+      .scale_y = 1.0f,
+      .mode = PPA_TRANS_MODE_BLOCKING,
+  };
+  if (host->landscape) {
+    operation.out.block_offset_x = (uint32_t)top;
+    operation.out.block_offset_y = BSP_LCD_V_RES - (uint32_t)left - size;
+    operation.rotation_angle = PPA_SRM_ROTATION_ANGLE_90;
+  }
+  ESP_ERROR_CHECK(ppa_do_scale_rotate_mirror(host->mover, &operation));
+}
 
 static esp_err_t sample_input(pocketjs_ui_input_t *input, void *user_data) {
   static pocketjs_ui_touch_t touches[POCKETJS_UI_MAX_TOUCHES];
@@ -106,21 +232,40 @@ static esp_err_t sample_input(pocketjs_ui_input_t *input, void *user_data) {
                       TAG, "touch data");
   const pocketjs_package_host_contract_t *contract =
       &pocketjs_package_app_contract;
+  const uint32_t logical_width = contract->auxiliary_width != 0U
+                                     ? contract->auxiliary_width
+                                     : contract->logical_width;
+  const uint32_t logical_height = contract->auxiliary_width != 0U
+                                      ? contract->auxiliary_height
+                                      : contract->logical_height;
+  bool on_button = false;
   input->touch_count = 0;
   for (uint8_t index = 0; index < count; ++index) {
-    const uint32_t x = host->landscape
-                           ? contract->physical_width - 1U - points[index].y
-                           : points[index].x;
-    const uint32_t y = host->landscape ? points[index].x : points[index].y;
-    if (x >= contract->physical_width || y >= contract->physical_height)
+    const int32_t screen_x = host->landscape
+                                 ? (int32_t)BSP_LCD_V_RES - 1 - points[index].y
+                                 : points[index].x;
+    const int32_t screen_y = host->landscape ? points[index].x : points[index].y;
+    const int32_t x = screen_x - (int32_t)host->origin_x;
+    const int32_t y = screen_y - (int32_t)host->origin_y;
+    if (x < 0 || y < 0 || x >= (int32_t)host->picture_width ||
+        y >= (int32_t)host->picture_height) {
+      on_button |= host->button_shown && on_home_button(host, screen_x, screen_y);
       continue;
+    }
     touches[input->touch_count++] = (pocketjs_ui_touch_t){
         .id = points[index].track_id,
-        .x = x * contract->logical_width / contract->physical_width,
-        .y = y * contract->logical_height / contract->physical_height,
+        .x = (uint32_t)x * logical_width / host->picture_width,
+        .y = (uint32_t)y * logical_height / host->picture_height,
     };
   }
   input->touches = touches;
+  /* The button acts on release, like a key: one frame of SELECT. */
+  input->buttons = host->button_released ? TAB5_BUTTON_SELECT : 0U;
+  host->button_released = host->button_pressed && !on_button;
+  if (on_button != host->button_pressed) {
+    host->button_pressed = on_button;
+    paint_home_button(host);
+  }
   return ESP_OK;
 }
 
@@ -248,18 +393,17 @@ static esp_err_t move_pixels(tab5_host_t *host,
                              const pocketjs_ui_frame_view_t *frame,
                              const pocketjs_rgb565_motion_t *motion) {
   const uint32_t unit = frame->raster_density * host->scale;
-  const uint32_t picture_width = frame->logical_width * unit;
-  uint32_t x0 = motion->destination.x * unit;
-  uint32_t y0 = motion->destination.y * unit;
+  uint32_t x0 = host->origin_x + motion->destination.x * unit;
+  uint32_t y0 = host->origin_y + motion->destination.y * unit;
   uint32_t x1 = x0 + motion->destination.width * unit;
   uint32_t y1 = y0 + motion->destination.height * unit;
   int32_t dx = motion->dx * (int32_t)unit;
   int32_t dy = motion->dy * (int32_t)unit;
   if (host->landscape) {
-    /* Picture (x, y) is panel (y, width - 1 - x). */
+    /* Screen (x, y) is panel (y, 1280 - 1 - x). */
     const uint32_t px0 = y0, px1 = y1;
-    y0 = picture_width - x1;
-    y1 = picture_width - x0;
+    y0 = BSP_LCD_V_RES - x1;
+    y1 = BSP_LCD_V_RES - x0;
     x0 = px0;
     x1 = px1;
     const int32_t picture_dx = dx;
@@ -313,9 +457,11 @@ static esp_err_t present_strip(tab5_host_t *host, tab5_lane_t *lane,
   const uint32_t w = rect.width * density;
   const uint32_t h = rect.height * density;
   const uint32_t scale = host->scale;
-  if (!host->landscape && scale == 1U && w == width) {
+  if (!host->landscape && scale == 1U && w == width &&
+      width == BSP_LCD_H_RES) {
     /* A full-width portrait strip is one contiguous run of panel rows. */
-    return esp_async_memcpy(lane->copy, host->framebuffer + y * width,
+    return esp_async_memcpy(lane->copy,
+                            host->framebuffer + (host->origin_y + y) * width,
                             lane->strips[index],
                             (size_t)w * h * sizeof(uint16_t), on_copy_done,
                             lane->idle[index]);
@@ -337,8 +483,8 @@ static esp_err_t present_strip(tab5_host_t *host, tab5_lane_t *lane,
               .buffer_size = BSP_LCD_H_RES * BSP_LCD_V_RES * sizeof(uint16_t),
               .pic_w = BSP_LCD_H_RES,
               .pic_h = BSP_LCD_V_RES,
-              .block_offset_x = x * scale,
-              .block_offset_y = y * scale,
+              .block_offset_x = host->origin_x + x * scale,
+              .block_offset_y = host->origin_y + y * scale,
               .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
           },
       .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
@@ -348,9 +494,10 @@ static esp_err_t present_strip(tab5_host_t *host, tab5_lane_t *lane,
       .user_data = lane->idle[index],
   };
   if (host->landscape) {
-    /* Picture (x, y) lands on panel (y, width - 1 - x). */
-    operation.out.block_offset_x = y * scale;
-    operation.out.block_offset_y = (width - x - w) * scale;
+    /* Screen (x, y) lands on panel (y, 1280 - 1 - x). */
+    operation.out.block_offset_x = host->origin_y + y * scale;
+    operation.out.block_offset_y =
+        BSP_LCD_V_RES - host->origin_x - (x + w) * scale;
     operation.rotation_angle = PPA_SRM_ROTATION_ANGLE_90;
   }
   return ppa_do_scale_rotate_mirror(lane->present, &operation);
@@ -484,6 +631,10 @@ static void start_panel(tab5_host_t *host) {
   ESP_ERROR_CHECK(
       esp_lcd_dpi_panel_get_frame_buffer(lcd.panel, 1, &framebuffer));
   host->framebuffer = framebuffer;
+  /* Space beside a picture narrower than the screen stays black. */
+  const size_t frame_bytes = BSP_LCD_H_RES * BSP_LCD_V_RES * sizeof(uint16_t);
+  memset(framebuffer, 0, frame_bytes);
+  esp_cache_msync(framebuffer, frame_bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
   ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(lcd.panel, true));
   ESP_ERROR_CHECK(bsp_display_backlight_on());
   ESP_ERROR_CHECK(bsp_touch_new(NULL, &host->touch));
@@ -521,17 +672,33 @@ static void start_lane(tab5_lane_t *lane, uint32_t scale, size_t strip_bytes) {
   }
 }
 
+
+
 static void run_app(void *unused) {
   static tab5_host_t host;
   const pocketjs_package_host_contract_t *contract =
       &pocketjs_package_app_contract;
   start_panel(&host);
-  host.landscape = contract->physical_width > contract->physical_height;
-  /* Both host profiles fill the panel. */
-  assert((host.landscape ? contract->physical_height
-                         : contract->physical_width) == BSP_LCD_H_RES);
-  assert((host.landscape ? contract->physical_width
-                         : contract->physical_height) == BSP_LCD_V_RES);
+  /* The picture is the auxiliary surface when the profile has one: the
+   * primary surface stays laid out off screen. */
+  const bool auxiliary = contract->auxiliary_width != 0U;
+  const uint32_t picture_width =
+      (auxiliary ? contract->auxiliary_width : contract->logical_width) *
+      contract->raster_density;
+  const uint32_t picture_height =
+      (auxiliary ? contract->auxiliary_height : contract->logical_height) *
+      contract->raster_density;
+  host.landscape = picture_width > picture_height;
+  const uint32_t screen_width = host.landscape ? BSP_LCD_V_RES : BSP_LCD_H_RES;
+  const uint32_t screen_height = host.landscape ? BSP_LCD_H_RES : BSP_LCD_V_RES;
+  host.scale = screen_width / picture_width < screen_height / picture_height
+                   ? screen_width / picture_width
+                   : screen_height / picture_height;
+  assert(host.scale >= 1U);
+  host.picture_width = picture_width * host.scale;
+  host.picture_height = picture_height * host.scale;
+  host.origin_x = (screen_width - host.picture_width) / 2U;
+  host.origin_y = 0U;
 
   pocketjs_package_t *package = NULL;
   ESP_ERROR_CHECK(pocketjs_package_open(
@@ -557,6 +724,8 @@ static void run_app(void *unused) {
       .struct_size = sizeof(binding_config),
       .target_id = contract->target_id,
       .host_abi = contract->host_abi,
+      .auxiliary_width = contract->auxiliary_width,
+      .auxiliary_height = contract->auxiliary_height,
   };
   pocketjs_ui_qjs_t *binding = NULL;
   ESP_ERROR_CHECK(
@@ -567,14 +736,12 @@ static void run_app(void *unused) {
   ESP_ERROR_CHECK(pocketjs_guest_eval(guest, (const char *)app.javascript.data,
                                       app.javascript.size - 1U, "app"));
 
-  host.scale = contract->physical_width /
-               (contract->logical_width * contract->raster_density);
   /* Strip bytes per logical row of the raster. */
-  const size_t row_bytes = (size_t)contract->logical_width *
-                           contract->raster_density *
-                           contract->raster_density * sizeof(uint16_t);
+  const size_t row_bytes =
+      (size_t)picture_width * contract->raster_density * sizeof(uint16_t);
   host.strip_rows = TAB5_STRIP_BYTES / row_bytes;
-  assert(8U * ((contract->logical_height + host.strip_rows - 1U) /
+  assert(8U * ((picture_height / contract->raster_density + host.strip_rows -
+                1U) /
                host.strip_rows) <= TAB5_MAX_STRIPS);
   start_lane(&host.lanes[0], contract->raster_density, TAB5_STRIP_BYTES);
   start_lane(&host.lanes[1], contract->raster_density, TAB5_STRIP_BYTES);
@@ -589,6 +756,14 @@ static void run_app(void *unused) {
   mover_copy_config.dma_burst_size = 64;
   ESP_ERROR_CHECK(
       esp_async_memcpy_install_gdma_axi(&mover_copy_config, &host.mover_copy));
+  if (host.picture_width < screen_width || host.picture_height < screen_height) {
+    host.button = heap_caps_aligned_alloc(
+        128, TAB5_BUTTON_SIZE * TAB5_BUTTON_SIZE * sizeof(uint16_t),
+        MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    assert(host.button != NULL);
+    host.button_shown = true;
+    paint_home_button(&host);
+  }
   host.moved = xSemaphoreCreateCounting(TAB5_MOVE_BACKLOG, 0);
   host.written = xSemaphoreCreateCounting(2, 0);
   host.move_state = xEventGroupCreate();
@@ -597,7 +772,9 @@ static void run_app(void *unused) {
 
   pocketjs_runner_config_t runner_config;
   pocketjs_runner_config_defaults(&runner_config);
-  runner_config.task_stack_bytes = 24U * 1024U;
+  /* Solid's reactive graph recurses through the stack in a turn. */
+  runner_config.task_stack_bytes = 64U * 1024U;
+  runner_config.task_stack_caps = MALLOC_CAP_SPIRAM;
   runner_config.task_core = 0;
   runner_config.sample_input = sample_input;
   runner_config.after_turn = after_turn;

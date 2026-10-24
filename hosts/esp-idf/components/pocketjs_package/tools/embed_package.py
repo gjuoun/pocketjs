@@ -96,6 +96,14 @@ def escaped(path: Path) -> str:
     return str(path.resolve()).replace("\\", "\\\\").replace('"', '\\"')
 
 
+def auxiliary_viewport(profile_path: Path) -> tuple[int, int]:
+    auxiliary = json.loads(profile_path.read_text(encoding="utf-8"))["display"].get("auxiliary")
+    if auxiliary is None:
+        return (0, 0)
+    width, height = auxiliary["logicalViewports"][0]
+    return (width, height)
+
+
 def validate_profile(
     profile_path: Path,
     target: str,
@@ -129,6 +137,7 @@ def generate(package: Path, profile: Path, name: str, output_dir: Path) -> None:
     validate(data)
     target, host_fields, profile_hash = host_contract(data)
     validate_profile(profile.resolve(), target, host_fields, profile_hash)
+    auxiliary = auxiliary_viewport(profile.resolve())
     output_dir.mkdir(parents=True, exist_ok=True)
     symbol = f"pocketjs_package_{name}"
     (output_dir / f"{symbol}.h").write_text(
@@ -161,6 +170,8 @@ def generate(package: Path, profile: Path, name: str, output_dir: Path) -> None:
         "    .profile_hash = { "
         + ", ".join(f"0x{byte:02x}" for byte in profile_hash)
         + " },\n"
+        f"    .auxiliary_width = {auxiliary[0]}U,\n"
+        f"    .auxiliary_height = {auxiliary[1]}U,\n"
         "};\n",
         encoding="utf-8",
     )

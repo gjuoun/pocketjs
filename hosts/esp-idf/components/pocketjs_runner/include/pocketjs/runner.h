@@ -29,6 +29,9 @@ typedef struct {
   pocketjs_runner_sample_input_fn sample_input;
   pocketjs_runner_after_turn_fn after_turn;
   void *user_data;
+  /** heap_caps for the task stack (MALLOC_CAP_SPIRAM for a deep guest), or 0
+   * for the default internal RAM. */
+  uint32_t task_stack_caps;
 } pocketjs_runner_config_t;
 
 typedef struct {

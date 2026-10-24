@@ -93,8 +93,13 @@ static void runner_task(void *opaque) {
     xSemaphoreGive(runner->stats_lock);
     tick++;
   }
+  /* The runner may be freed once `exited` is given. */
+  const uint32_t stack_caps = runner->config.task_stack_caps;
   xSemaphoreGive(runner->exited);
-  vTaskDelete(NULL);
+  if (stack_caps != 0U)
+    vTaskDeleteWithCaps(NULL);
+  else
+    vTaskDelete(NULL);
 }
 
 esp_err_t pocketjs_runner_start(pocketjs_ui_qjs_t *binding,
@@ -133,10 +138,17 @@ esp_err_t pocketjs_runner_start(pocketjs_ui_qjs_t *binding,
     free(runner);
     return ESP_ERR_NO_MEM;
   }
-  const BaseType_t created = xTaskCreatePinnedToCore(
-      runner_task, config->task_name != NULL ? config->task_name : "pocketjs",
-      config->task_stack_bytes, runner, config->task_priority, NULL,
-      config->task_core);
+  const char *name = config->task_name != NULL ? config->task_name : "pocketjs";
+  const BaseType_t created =
+      config->task_stack_caps != 0U
+          ? xTaskCreatePinnedToCoreWithCaps(
+                runner_task, name, config->task_stack_bytes, runner,
+                config->task_priority, NULL, config->task_core,
+                config->task_stack_caps)
+          : xTaskCreatePinnedToCore(runner_task, name,
+                                    config->task_stack_bytes, runner,
+                                    config->task_priority, NULL,
+                                    config->task_core);
   if (created != pdPASS) {
     vSemaphoreDelete(runner->wake);
     vSemaphoreDelete(runner->exited);

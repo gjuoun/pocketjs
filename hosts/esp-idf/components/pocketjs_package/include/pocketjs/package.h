@@ -47,6 +47,10 @@ typedef struct {
   uint32_t raster_density;
   pocketjs_presentation_t presentation;
   uint8_t profile_hash[POCKETJS_PACKAGE_HASH_BYTES];
+  /** The profile's auxiliary logical viewport (`display.auxiliary`), or 0x0.
+   * The profile hash binds it; package selection does not read it. */
+  uint32_t auxiliary_width;
+  uint32_t auxiliary_height;
 } pocketjs_package_host_contract_t;
 
 typedef struct {

@@ -30,6 +30,9 @@ typedef struct {
   const uint32_t *touches;
   const int32_t *touch_hits;
   size_t touch_count;
+  /** The output each contact lies on (0 primary, 1 auxiliary), or NULL when
+   * every contact is on the primary output. Requires touch_hits. */
+  const uint8_t *touch_surfaces;
 } pocketjs_guest_frame_t;
 
 typedef struct {

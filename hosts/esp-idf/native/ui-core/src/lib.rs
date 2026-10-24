@@ -288,6 +288,41 @@ pub unsafe extern "C" fn pocketjs_native_ui_hit_test_bounds(
     core_mut(core).map_or(0, |core| core.ui.hit_test_bounds(x, y))
 }
 
+/// Create the auxiliary output root (`display.auxiliary`), or resize it.
+/// Returns its node id, or 0 for an invalid size.
+#[no_mangle]
+pub unsafe extern "C" fn pocketjs_native_ui_create_auxiliary_surface(
+    core: *mut NativeUiCore,
+    width: u32,
+    height: u32,
+) -> i32 {
+    let Some(core) = core_mut(core) else { return 0 };
+    if width == 0 || height == 0 {
+        return 0;
+    }
+    let root = core.ui.create_auxiliary_surface(width as f32, height as f32);
+    mutated(core);
+    root
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pocketjs_native_ui_hit_test_auxiliary(
+    core: *mut NativeUiCore,
+    x: f32,
+    y: f32,
+) -> i32 {
+    core_mut(core).map_or(0, |core| core.ui.hit_test_auxiliary(x, y))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pocketjs_native_ui_hit_test_bounds_auxiliary(
+    core: *mut NativeUiCore,
+    x: f32,
+    y: f32,
+) -> i32 {
+    core_mut(core).map_or(0, |core| core.ui.hit_test_bounds_auxiliary(x, y))
+}
+
 unsafe fn load_bytes(core: *mut NativeUiCore, data: *const u8, size: usize, font: bool) -> i32 {
     let Some(core) = core_mut(core) else {
         return -1;
@@ -412,6 +447,20 @@ pub unsafe extern "C" fn pocketjs_native_ui_draw(
     core: *mut NativeUiCore,
     out: *mut NativeFrameView,
 ) -> i32 {
+    draw_surface(core, out, false)
+}
+
+/// Draw the auxiliary surface instead of the primary one: -1 when the core
+/// has none. Prepare and commit accept its view like a primary frame.
+#[no_mangle]
+pub unsafe extern "C" fn pocketjs_native_ui_draw_auxiliary(
+    core: *mut NativeUiCore,
+    out: *mut NativeFrameView,
+) -> i32 {
+    draw_surface(core, out, true)
+}
+
+unsafe fn draw_surface(core: *mut NativeUiCore, out: *mut NativeFrameView, auxiliary: bool) -> i32 {
     let Some(core) = core_mut(core) else {
         return -1;
     };
@@ -419,12 +468,26 @@ pub unsafe extern "C" fn pocketjs_native_ui_draw(
         return -1;
     }
     let output_size = (*out).struct_size;
+    let (width, height) = if auxiliary {
+        let Some(viewport) = core.ui.auxiliary_viewport() else {
+            return -1;
+        };
+        viewport
+    } else {
+        core.ui.viewport()
+    };
     // A frame view is a borrow, not a snapshot. Even another draw of the
     // same logical state invalidates the previous buffer and prepare token.
     mutated(core);
     let raster_density = core.ui.raster_density();
-    let (width, height) = core.ui.viewport();
-    let words = &core.ui.draw().words;
+    let words = if auxiliary {
+        match core.ui.draw_auxiliary() {
+            Some(list) => &list.words,
+            None => return -1,
+        }
+    } else {
+        &core.ui.draw().words
+    };
     let draw_words = words.as_ptr();
     let draw_word_count = words.len();
     let raster_revision = core.ui.raster_revision();
@@ -452,6 +515,29 @@ pub unsafe extern "C" fn pocketjs_native_ui_touch_hits(
     output: *mut i32,
     output_capacity: usize,
 ) -> usize {
+    touch_hits(core, touches, touch_count, output, output_capacity, false)
+}
+
+/// Touch hits for contacts on the auxiliary surface, in its coordinates.
+#[no_mangle]
+pub unsafe extern "C" fn pocketjs_native_ui_touch_hits_auxiliary(
+    core: *mut NativeUiCore,
+    touches: *const u32,
+    touch_count: usize,
+    output: *mut i32,
+    output_capacity: usize,
+) -> usize {
+    touch_hits(core, touches, touch_count, output, output_capacity, true)
+}
+
+unsafe fn touch_hits(
+    core: *mut NativeUiCore,
+    touches: *const u32,
+    touch_count: usize,
+    output: *mut i32,
+    output_capacity: usize,
+    auxiliary: bool,
+) -> usize {
     if touch_count > 8
         || touch_count > output_capacity
         || (touch_count != 0 && (touches.is_null() || output.is_null()))
@@ -466,7 +552,11 @@ pub unsafe extern "C" fn pocketjs_native_ui_touch_hits(
         slice::from_raw_parts(touches, touch_count)
     };
     let mut hits = [0i32; 8];
-    let count = core.ui.touch_hits(touches, &mut hits);
+    let count = if auxiliary {
+        core.ui.touch_hits_auxiliary(touches, &mut hits)
+    } else {
+        core.ui.touch_hits(touches, &mut hits)
+    };
     if count != 0 {
         ptr::copy_nonoverlapping(hits.as_ptr(), output, count);
     }

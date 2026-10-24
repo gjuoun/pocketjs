@@ -365,9 +365,10 @@ esp_err_t pocketjs_guest_frame(pocketjs_guest_t *guest,
   if (!JS_IsFunction(guest->context, guest->frame)) {
     return ESP_ERR_INVALID_STATE;
   }
-  JSValue arguments[4] = {
+  JSValue arguments[5] = {
       JS_NewUint32(guest->context, frame->buttons),
       JS_NewUint32(guest->context, frame->analog),
+      JS_UNDEFINED,
       JS_UNDEFINED,
       JS_UNDEFINED,
   };
@@ -395,6 +396,21 @@ esp_err_t pocketjs_guest_frame(pocketjs_guest_t *guest,
         return ESP_ERR_NO_MEM;
       }
       argument_count = 4;
+      if (frame->touch_surfaces != NULL) {
+        int32_t surfaces[POCKETJS_GUEST_MAX_TOUCHES];
+        for (size_t index = 0; index < frame->touch_count; ++index)
+          surfaces[index] = frame->touch_surfaces[index];
+        arguments[4] =
+            make_i32_array(guest->context, surfaces, frame->touch_count);
+        if (JS_IsException(arguments[4])) {
+          js_std_dump_error(guest->context);
+          for (int index = 3; index >= 0; --index)
+            JS_FreeValue(guest->context, arguments[index]);
+          guest->frame_errors++;
+          return ESP_ERR_NO_MEM;
+        }
+        argument_count = 5;
+      }
     }
   }
   JSValue result = JS_Call(guest->context, guest->frame, JS_UNDEFINED,
