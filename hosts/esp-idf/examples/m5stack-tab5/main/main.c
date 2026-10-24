@@ -58,12 +58,18 @@ static const char *TAG = "pocketjs_tab5";
  * tall while the panel scans out (measured on ESP32-P4 rev 1.3; 2 and 8 to
  * 28 rows complete), so no turned strip is shorter than this. */
 #define TAB5_MIN_TURNED_ROWS 8U
-/* The home button drawn below a picture shorter than the screen (or right
- * of one narrower than it): at most a square this many oriented screen pixels
- * wide, 4 pixels inside the margin on each side, and the SELECT bit it sends. */
-#define TAB5_BUTTON_MAX 88U
-#define TAB5_BUTTON_INSET 4U
+/* The home ball floats over the picture at the middle of its right edge: a
+ * translucent disc this many logical pixels wide, this far from the edge,
+ * and the SELECT bit it sends on release. */
+#define TAB5_BALL_SIZE 56U
+#define TAB5_BALL_INSET 8U
 #define TAB5_BUTTON_SELECT 0x0001U
+/* The stack of the task running guest frames, and of the task evaluating
+ * the guest: Solid's reactive graph recurses through the stack in a turn
+ * (Home's Settings page passes 64 KB). QuickJS stops a script this far
+ * below the top with a RangeError, before the task's guard page. */
+#define TAB5_GUEST_STACK (192U * 1024U)
+#define TAB5_GUEST_STACK_LIMIT (144U * 1024U)
 /* The embedded app is a launcher (Pocket Home): it installs apps from the
  * linked Mac and switches between them (pocketjs_system). */
 #ifndef TAB5_LAUNCHER
@@ -80,6 +86,7 @@ typedef struct {
   pocketjs_rgb565_renderer_t *renderer;
   const pocketjs_rgb565_accelerator_t *accelerator;
   ppa_client_handle_t present;
+  ppa_client_handle_t blend;
   uint16_t *strips[2];
   SemaphoreHandle_t idle[2];
   uint32_t next_strip;
@@ -102,6 +109,9 @@ typedef struct {
   uint32_t strip_rows;
   /* The bytes of one strip buffer: strip_rows logical rows. */
   size_t strip_bytes;
+  /* Logical rows per whole number of 128-byte cache lines: PPA operands
+   * span whole lines, so every strip holds a multiple of this many rows. */
+  uint32_t line_rows;
   TaskHandle_t helper;
   TaskHandle_t runner;
   /* Moves retained framebuffer pixels when a plan carries a motion: whole
@@ -122,17 +132,20 @@ typedef struct {
   uint32_t scale;
   /* The picture's size and top-left corner on the screen as the picture is
    * oriented (1280x720 for landscape), in panel pixels. A picture smaller
-   * than the screen sits in its middle between two equal black margins; the
-   * home button sits in the margin below or right of it. */
+   * than the screen sits in its middle between equal black margins. */
   uint32_t picture_width;
   uint32_t picture_height;
   uint32_t origin_x;
   uint32_t origin_y;
-  uint32_t button_size;
-  uint16_t *button;
-  bool button_shown;
-  bool button_pressed;
-  bool button_released;
+  /* The home ball: its rectangle in logical pixels, its faces (resting,
+   * pressed) as ARGB8888 rasters blended into every strip that covers it,
+   * and its touch state. */
+  pocketjs_rgb565_rect_t ball;
+  uint32_t ball_px;
+  uint32_t *ball_faces[2];
+  bool ball_pressed;
+  bool ball_released;
+  bool ball_repaint;
   int64_t frame_started;
   uint64_t frame_us;
   uint32_t frame_max_us;
@@ -145,57 +158,28 @@ static uint32_t oriented_height(const tab5_host_t *host) {
   return host->landscape ? BSP_LCD_H_RES : BSP_LCD_V_RES;
 }
 
-/* The button's top-left corner on the oriented screen: centered in the
- * margin below the picture, or right of it when the picture is as tall as the
- * screen. */
-static void home_button_origin(const tab5_host_t *host, int32_t *x, int32_t *y) {
-  const uint32_t screen_width = host->landscape ? BSP_LCD_V_RES : BSP_LCD_H_RES;
-  const uint32_t size = host->button_size;
-  const uint32_t bottom = host->origin_y + host->picture_height;
-  if (bottom < oriented_height(host)) {
-    *x = (int32_t)((screen_width - size) / 2U);
-    *y = (int32_t)(bottom + (oriented_height(host) - bottom - size) / 2U);
-    return;
-  }
-  const uint32_t right = host->origin_x + host->picture_width;
-  *x = (int32_t)(right + (screen_width - right - size) / 2U);
-  *y = (int32_t)((oriented_height(host) - size) / 2U);
-}
-
-/* The whole margin below (or right of) the picture answers, so a thumb need
- * not aim; the margin above (or left of) it does not. */
-static bool on_home_button(const tab5_host_t *host, int32_t x, int32_t y) {
-  if (host->origin_y + host->picture_height < oriented_height(host))
-    return y >= (int32_t)(host->origin_y + host->picture_height);
-  return x >= (int32_t)(host->origin_x + host->picture_width);
-}
-
-static uint16_t rgb565(uint32_t r, uint32_t g, uint32_t b) {
-  return (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
-}
-
-/* Coverage of one pixel by the button's disc and by the rounded square
- * drawn on it, from 4x4 samples. The proportions are those of the 88-pixel
- * button; the stroke stays at least 1.5 pixels wide. */
-static void button_coverage(uint32_t size, float px, float py, float *disc,
-                            float *mark) {
-  const float unit = size / (float)TAB5_BUTTON_MAX;
-  const float center = size / 2.0f;
-  const float radius = 40.0f * unit;
-  const float half = 13.0f * unit;
-  const float corner = 5.5f * unit;
-  const float stroke = fmaxf(2.5f * unit, 1.5f);
+/* Coverage of one raster pixel by the ball's disc and by the rounded
+ * square drawn on it, from 4x4 samples. The proportions are those of the
+ * 56-pixel ball. */
+static void ball_coverage(uint32_t px, float x, float y, float *disc,
+                          float *mark) {
+  const float unit = px / (float)TAB5_BALL_SIZE;
+  const float center = px / 2.0f;
+  const float radius = 27.0f * unit;
+  const float half = 8.5f * unit;
+  const float corner = 3.5f * unit;
+  const float stroke = fmaxf(1.8f * unit, 1.2f);
   uint32_t in_disc = 0;
   uint32_t in_mark = 0;
   for (uint32_t sy = 0; sy < 4U; ++sy) {
     for (uint32_t sx = 0; sx < 4U; ++sx) {
-      const float x = px + (sx + 0.5f) / 4.0f - center;
-      const float y = py + (sy + 0.5f) / 4.0f - center;
-      if (x * x + y * y <= radius * radius)
+      const float dx = x + (sx + 0.5f) / 4.0f - center;
+      const float dy = y + (sy + 0.5f) / 4.0f - center;
+      if (dx * dx + dy * dy <= radius * radius)
         ++in_disc;
       /* Signed distance to the rounded square's outline. */
-      const float qx = fabsf(x) - (half - corner);
-      const float qy = fabsf(y) - (half - corner);
+      const float qx = fabsf(dx) - (half - corner);
+      const float qy = fabsf(dy) - (half - corner);
       const float ox = qx > 0.0f ? qx : 0.0f;
       const float oy = qy > 0.0f ? qy : 0.0f;
       const float inside = fminf(fmaxf(qx, qy), 0.0f);
@@ -208,51 +192,100 @@ static void button_coverage(uint32_t size, float px, float py, float *disc,
   *mark = in_mark / 16.0f;
 }
 
-/* The button's pixels rounded up to whole 128-byte cache lines. */
-static size_t button_bytes(uint32_t size) {
-  return (size * size * sizeof(uint16_t) + 127U) & ~(size_t)127U;
+static size_t ball_bytes(uint32_t px) {
+  return (px * px * sizeof(uint32_t) + 127U) & ~(size_t)127U;
 }
 
-/* Paint the home button in its pressed or resting state. The pixels go
- * through the mover's PPA client, which turns them onto the portrait panel
- * like a strip in landscape. */
-static void paint_home_button(tab5_host_t *host) {
-  const uint32_t size = host->button_size;
-  const float face = host->button_pressed ? 70.0f : 30.0f;
-  for (uint32_t y = 0; y < size; ++y) {
-    for (uint32_t x = 0; x < size; ++x) {
-      float disc;
-      float mark;
-      button_coverage(size, (float)x, (float)y, &disc, &mark);
-      const float level = disc * face + mark * (142.0f - face);
-      host->button[y * size + x] = rgb565((uint32_t)level, (uint32_t)level,
-                                          (uint32_t)(level * 1.03f));
+/* Paint the ball's two faces: a dark translucent disc with a light rounded
+ * square on it, the disc lighter while pressed. */
+static void paint_ball(tab5_host_t *host) {
+  const uint32_t px = host->ball_px;
+  for (uint32_t face = 0; face < 2U; ++face) {
+    const float level = face ? 118.0f : 36.0f;
+    uint32_t *out = host->ball_faces[face];
+    for (uint32_t y = 0; y < px; ++y) {
+      for (uint32_t x = 0; x < px; ++x) {
+        float disc;
+        float mark;
+        ball_coverage(px, (float)x, (float)y, &disc, &mark);
+        const float disc_alpha = disc * 0.74f;
+        const float mark_alpha = mark * 0.95f;
+        /* The mark over the disc, straight alpha. */
+        const float alpha = mark_alpha + disc_alpha * (1.0f - mark_alpha);
+        const float value =
+            alpha > 0.0f
+                ? (236.0f * mark_alpha + level * disc_alpha * (1.0f - mark_alpha)) / alpha
+                : 0.0f;
+        const uint32_t grey = (uint32_t)value;
+        const uint32_t blue = (uint32_t)fminf(value * 1.03f, 255.0f);
+        out[y * px + x] = ((uint32_t)(alpha * 255.0f) << 24) | (grey << 16) |
+                          (grey << 8) | blue;
+      }
     }
+    esp_cache_msync(out, ball_bytes(px), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
   }
-  esp_cache_msync(host->button, button_bytes(size), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-  int32_t left;
-  int32_t top;
-  home_button_origin(host, &left, &top);
-  ppa_srm_oper_config_t operation = {
-      .in = {.buffer = host->button, .pic_w = size, .pic_h = size,
-             .block_w = size, .block_h = size,
-             .srm_cm = PPA_SRM_COLOR_MODE_RGB565},
-      .out = {.buffer = host->framebuffer,
-              .buffer_size = BSP_LCD_H_RES * BSP_LCD_V_RES * sizeof(uint16_t),
-              .pic_w = BSP_LCD_H_RES, .pic_h = BSP_LCD_V_RES,
-              .block_offset_x = (uint32_t)left, .block_offset_y = (uint32_t)top,
-              .srm_cm = PPA_SRM_COLOR_MODE_RGB565},
-      .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
-      .scale_x = 1.0f,
-      .scale_y = 1.0f,
+}
+
+/* Whether a logical point lies on the ball's disc. */
+static bool on_ball(const tab5_host_t *host, uint32_t x, uint32_t y) {
+  const float dx = (float)x - (host->ball.x + TAB5_BALL_SIZE / 2.0f);
+  const float dy = (float)y - (host->ball.y + TAB5_BALL_SIZE / 2.0f);
+  const float radius = TAB5_BALL_SIZE / 2.0f;
+  return dx * dx + dy * dy <= radius * radius;
+}
+
+/* The part of the ball a strip covers, in logical pixels; false when none. */
+static bool ball_in_strip(const tab5_host_t *host, pocketjs_rgb565_rect_t strip,
+                          pocketjs_rgb565_rect_t *out) {
+  const uint32_t x0 = strip.x > host->ball.x ? strip.x : host->ball.x;
+  const uint32_t y0 = strip.y > host->ball.y ? strip.y : host->ball.y;
+  const uint32_t x1 = strip.x + strip.width < host->ball.x + host->ball.width
+                          ? strip.x + strip.width
+                          : host->ball.x + host->ball.width;
+  const uint32_t y1 = strip.y + strip.height < host->ball.y + host->ball.height
+                          ? strip.y + strip.height
+                          : host->ball.y + host->ball.height;
+  if (x1 <= x0 || y1 <= y0)
+    return false;
+  *out = (pocketjs_rgb565_rect_t){.x = x0, .y = y0, .width = x1 - x0, .height = y1 - y0};
+  return true;
+}
+
+/* Blend the ball's face into a rendered strip, before the strip presents:
+ * the framebuffer then holds the ball wherever the picture changed under
+ * it, and a frame that leaves those rows alone leaves the ball alone. */
+static esp_err_t blend_ball(tab5_host_t *host, tab5_lane_t *lane,
+                            const pocketjs_ui_frame_view_t *frame,
+                            pocketjs_rgb565_rect_t strip, uint32_t index) {
+  pocketjs_rgb565_rect_t part;
+  if (!ball_in_strip(host, strip, &part))
+    return ESP_OK;
+  const uint32_t density = frame->raster_density;
+  const uint32_t width = frame->logical_width * density;
+  const uint32_t rows = strip.height * density;
+  const ppa_blend_oper_config_t operation = {
+      .in_bg = {.buffer = lane->strips[index], .pic_w = width, .pic_h = rows,
+                .block_w = part.width * density, .block_h = part.height * density,
+                .block_offset_x = part.x * density,
+                .block_offset_y = (part.y - strip.y) * density,
+                .blend_cm = PPA_BLEND_COLOR_MODE_RGB565},
+      .in_fg = {.buffer = host->ball_faces[host->ball_pressed ? 1 : 0],
+                .pic_w = host->ball_px, .pic_h = host->ball_px,
+                .block_w = part.width * density, .block_h = part.height * density,
+                .block_offset_x = (part.x - host->ball.x) * density,
+                .block_offset_y = (part.y - host->ball.y) * density,
+                .blend_cm = PPA_BLEND_COLOR_MODE_ARGB8888},
+      .out = {.buffer = lane->strips[index],
+              .buffer_size = (size_t)width * rows * sizeof(uint16_t),
+              .pic_w = width, .pic_h = rows,
+              .block_offset_x = part.x * density,
+              .block_offset_y = (part.y - strip.y) * density,
+              .blend_cm = PPA_BLEND_COLOR_MODE_RGB565},
+      .bg_alpha_update_mode = PPA_ALPHA_NO_CHANGE,
+      .fg_alpha_update_mode = PPA_ALPHA_NO_CHANGE,
       .mode = PPA_TRANS_MODE_BLOCKING,
   };
-  if (host->landscape) {
-    operation.out.block_offset_x = (uint32_t)top;
-    operation.out.block_offset_y = BSP_LCD_V_RES - (uint32_t)left - size;
-    operation.rotation_angle = PPA_SRM_ROTATION_ANGLE_90;
-  }
-  ESP_ERROR_CHECK(ppa_do_scale_rotate_mirror(host->mover, &operation));
+  return ppa_do_blend(lane->blend, &operation);
 }
 
 static esp_err_t sample_input(pocketjs_ui_input_t *input, void *user_data) {
@@ -274,7 +307,7 @@ static esp_err_t sample_input(pocketjs_ui_input_t *input, void *user_data) {
   const uint32_t logical_height = contract->auxiliary_width != 0U
                                       ? contract->auxiliary_height
                                       : contract->logical_height;
-  bool on_button = false;
+  bool on_ball_now = false;
   input->touch_count = 0;
   for (uint8_t index = 0; index < count; ++index) {
     const int32_t screen_x = host->landscape
@@ -284,20 +317,24 @@ static esp_err_t sample_input(pocketjs_ui_input_t *input, void *user_data) {
     const int32_t x = screen_x - (int32_t)host->origin_x;
     const int32_t y = screen_y - (int32_t)host->origin_y;
     if (x < 0 || y < 0 || x >= (int32_t)host->picture_width ||
-        y >= (int32_t)host->picture_height) {
-      on_button |= host->button_shown && on_home_button(host, screen_x, screen_y);
+        y >= (int32_t)host->picture_height)
       continue;
-    }
-    touches[input->touch_count++] = (pocketjs_ui_touch_t){
+    const pocketjs_ui_touch_t touch = {
         .id = points[index].track_id,
         .x = (uint32_t)x * logical_width / host->picture_width,
         .y = (uint32_t)y * logical_height / host->picture_height,
     };
+    /* A touch on the ball is the ball's, not the picture's. */
+    if (on_ball(host, touch.x, touch.y)) {
+      on_ball_now = true;
+      continue;
+    }
+    touches[input->touch_count++] = touch;
   }
   input->touches = touches;
-  /* The button acts on release, like a key: one frame of SELECT. Outside
-   * the launcher it summons the launcher instead. */
-  input->buttons = host->button_released ? TAB5_BUTTON_SELECT : 0U;
+  /* The ball acts on release, like a key: one frame of SELECT. Outside the
+   * launcher it summons the launcher instead. */
+  input->buttons = host->ball_released ? TAB5_BUTTON_SELECT : 0U;
   if (TAB5_LAUNCHER) {
     pocketjs_system_pump();
     if (input->buttons != 0U && !pocketjs_system_launcher_running()) {
@@ -309,10 +346,10 @@ static esp_err_t sample_input(pocketjs_ui_input_t *input, void *user_data) {
       xTaskNotifyGive(host->app_task);
     }
   }
-  host->button_released = host->button_pressed && !on_button;
-  if (on_button != host->button_pressed) {
-    host->button_pressed = on_button;
-    paint_home_button(host);
+  host->ball_released = host->ball_pressed && !on_ball_now;
+  if (on_ball_now != host->ball_pressed) {
+    host->ball_pressed = on_ball_now;
+    host->ball_repaint = true;
   }
   return ESP_OK;
 }
@@ -567,6 +604,8 @@ static esp_err_t run_lane(tab5_host_t *host, tab5_lane_t *lane) {
     esp_err_t result = pocketjs_rgb565_render_strip(
         lane->renderer, frame, lane->strips[index], row_pixels * rect.height,
         rect, lane->accelerator, &stats);
+    if (result == ESP_OK)
+      result = blend_ball(host, lane, frame, rect, index);
     /* A strip may cover rows the motion still has to read. */
     xEventGroupWaitBits(host->move_state, TAB5_MOVED_BIT, pdFALSE, pdTRUE,
                         portMAX_DELAY);
@@ -598,6 +637,54 @@ static void helper_task(void *user_data) {
   }
 }
 
+/* Whether a landscape motion moves whole panel rows: the picture fills the
+ * panel's width, the moved region spans the picture's height and the move
+ * is along the screen's x axis. Such a move goes through the DMA channels;
+ * any other landscape move bounces through the PPA. */
+static bool moves_panel_rows(const tab5_host_t *host,
+                             const pocketjs_ui_frame_view_t *frame,
+                             const pocketjs_rgb565_motion_t *motion) {
+  const uint32_t unit = frame->raster_density * host->scale;
+  return motion->dy == 0 && host->origin_y == 0U &&
+         motion->destination.y == 0U &&
+         motion->destination.height * unit == BSP_LCD_H_RES;
+}
+
+/* Queue a region's strips. Landscape strips share the region's rows
+ * evenly, so the last one is not a short remainder; a landscape logical
+ * row is a whole number of cache lines, so any count is aligned. */
+static void add_region(tab5_host_t *host, const pocketjs_ui_frame_view_t *frame,
+                       pocketjs_rgb565_rect_t region) {
+  const uint32_t turned_rows =
+      (TAB5_MIN_TURNED_ROWS + frame->raster_density - 1U) /
+      frame->raster_density;
+  if (host->landscape && region.height < turned_rows)
+    region.height = turned_rows;
+  /* A region grows to whole cache lines of rows, downward when the surface
+   * has them, upward at its bottom edge. Repainting more rows is exact. */
+  const uint32_t unit = host->line_rows;
+  region.height = (region.height + unit - 1U) / unit * unit;
+  if (region.y + region.height > frame->logical_height)
+    region.y = frame->logical_height - region.height;
+  const uint32_t count =
+      (region.height + host->strip_rows - 1U) / host->strip_rows;
+  const uint32_t units = region.height / unit;
+  uint32_t y = region.y;
+  for (uint32_t strip = 0; strip < count; ++strip) {
+    pocketjs_rgb565_rect_t rect = region;
+    rect.y = y;
+    rect.height =
+        host->landscape
+            ? (units / count + (strip < units % count ? 1U : 0U)) * unit
+            : (region.y + region.height - y < host->strip_rows
+                   ? region.y + region.height - y
+                   : host->strip_rows);
+    assert(host->strip_count < TAB5_MAX_STRIPS);
+    host->strips[host->strip_count++] = rect;
+    y += rect.height;
+  }
+}
+
 static esp_err_t after_turn(const pocketjs_ui_frame_view_t *frame,
                             void *user_data) {
   tab5_host_t *host = user_data;
@@ -607,6 +694,13 @@ static esp_err_t after_turn(const pocketjs_ui_frame_view_t *frame,
   ESP_RETURN_ON_ERROR(pocketjs_rgb565_prepare_motion(renderer, host->target,
                                                      frame, &plan, &motion),
                       TAG, "prepare");
+  /* A landscape move along the panel's rows bounces every band through a
+   * strip twice (about 45 ms per full-surface move): repainting the moved
+   * region costs less at density 1, so the plan repaints it instead. */
+  const bool repainted =
+      motion.present && host->landscape && !moves_panel_rows(host, frame, &motion);
+  if (repainted)
+    motion.present = false;
   host->frame = frame;
   host->motion = motion;
   host->move_result = ESP_OK;
@@ -616,46 +710,31 @@ static esp_err_t after_turn(const pocketjs_ui_frame_view_t *frame,
     xEventGroupSetBits(host->move_state, TAB5_MOVED_BIT);
   }
   host->strip_count = 0;
-  for (uint32_t index = 0; index < plan.region_count; ++index) {
-    pocketjs_rgb565_rect_t region = plan.regions[index];
-    /* PPA output buffers must span whole 128-byte cache lines: an even
-     * number of logical rows keeps a portrait strip's size a multiple of
-     * 128 bytes. Repainting one more row is exact. */
-    if ((region.height & 1U) != 0U) {
-      if (region.y + region.height < frame->logical_height)
-        ++region.height;
-      else if (region.y > 0U) {
-        --region.y;
-        ++region.height;
-      }
-    }
-    const uint32_t turned_rows =
-        (TAB5_MIN_TURNED_ROWS + frame->raster_density - 1U) /
-        frame->raster_density;
-    if (host->landscape && region.height < turned_rows) {
-      if (region.y + turned_rows > frame->logical_height)
-        region.y = frame->logical_height - turned_rows;
-      region.height = turned_rows;
-    }
-    /* Landscape strips share the region's rows evenly, so the last one is
-     * not a short remainder; a landscape logical row is a whole number of
-     * cache lines, so any count is aligned. */
-    const uint32_t count =
-        (region.height + host->strip_rows - 1U) / host->strip_rows;
-    uint32_t y = region.y;
-    for (uint32_t strip = 0; strip < count; ++strip) {
-      pocketjs_rgb565_rect_t rect = region;
-      rect.y = y;
-      rect.height =
-          host->landscape
-              ? region.height / count + (strip < region.height % count ? 1U : 0U)
-              : (region.y + region.height - y < host->strip_rows
-                     ? region.y + region.height - y
-                     : host->strip_rows);
-      host->strips[host->strip_count++] = rect;
-      y += rect.height;
+  if (host->ball_repaint) {
+    add_region(host, frame, host->ball);
+    host->ball_repaint = false;
+  }
+  if (motion.present) {
+    /* The move carries the ball's pixels along: repaint where they were
+     * and where they land. */
+    add_region(host, frame, host->ball);
+    pocketjs_rgb565_rect_t ghost = host->ball;
+    const int32_t gx = (int32_t)ghost.x + motion.dx;
+    const int32_t gy = (int32_t)ghost.y + motion.dy;
+    ghost.x = gx < 0 ? 0U : (uint32_t)gx;
+    ghost.y = gy < 0 ? 0U : (uint32_t)gy;
+    if (ghost.x < frame->logical_width && ghost.y < frame->logical_height) {
+      if (ghost.x + ghost.width > frame->logical_width)
+        ghost.width = frame->logical_width - ghost.x;
+      if (ghost.y + ghost.height > frame->logical_height)
+        ghost.height = frame->logical_height - ghost.y;
+      add_region(host, frame, ghost);
     }
   }
+  if (repainted)
+    add_region(host, frame, motion.destination);
+  for (uint32_t index = 0; index < plan.region_count; ++index)
+    add_region(host, frame, plan.regions[index]);
   esp_err_t result = ESP_OK;
   if (host->strip_count > 0U) {
     host->runner = xTaskGetCurrentTaskHandle();
@@ -721,6 +800,11 @@ static void start_lane(tab5_lane_t *lane, uint32_t scale, size_t strip_bytes) {
       .max_pending_trans_num = 2,
   };
   ESP_ERROR_CHECK(ppa_register_client(&present_config, &lane->present));
+  const ppa_client_config_t blend_config = {
+      .oper_type = PPA_OPERATION_BLEND,
+      .max_pending_trans_num = 1,
+  };
+  ESP_ERROR_CHECK(ppa_register_client(&blend_config, &lane->blend));
   const ppa_event_callbacks_t present_callbacks = {
       .on_trans_done = on_srm_done,
   };
@@ -770,6 +854,7 @@ static esp_err_t boot_guest(tab5_host_t *host,
   tab5_guest_t running = {0};
   pocketjs_guest_config_t guest_config;
   pocketjs_guest_config_defaults(&guest_config);
+  guest_config.stack_limit = TAB5_GUEST_STACK_LIMIT;
   esp_err_t result = pocketjs_guest_create(&guest_config, &running.guest);
   pocketjs_ui_core_config_t core_config;
   pocketjs_ui_core_config_defaults(&core_config);
@@ -804,8 +889,7 @@ static esp_err_t boot_guest(tab5_host_t *host,
                                  app->javascript.size - 1U, "app");
   pocketjs_runner_config_t runner_config;
   pocketjs_runner_config_defaults(&runner_config);
-  /* Solid's reactive graph recurses through the stack in a turn. */
-  runner_config.task_stack_bytes = 64U * 1024U;
+  runner_config.task_stack_bytes = TAB5_GUEST_STACK;
   runner_config.task_stack_caps = MALLOC_CAP_SPIRAM;
   runner_config.task_core = 0;
   runner_config.sample_input = sample_input;
@@ -968,8 +1052,16 @@ static void run_app(void *unused) {
     if (block / 4U - 128U < strip_budget)
       strip_budget = block / 4U - 128U;
   }
-  host.strip_rows = strip_budget / row_bytes;
+  /* PPA operands span whole 128-byte cache lines: a strip holds a count of
+   * rows whose bytes are a multiple of 128 (four 1184-byte rows, fourteen
+   * 4736-byte rows). */
+  host.line_rows = 1U;
+  while ((host.line_rows * row_bytes) % 128U != 0U)
+    ++host.line_rows;
+  host.strip_rows = strip_budget / row_bytes / host.line_rows * host.line_rows;
   host.strip_bytes = host.strip_rows * row_bytes;
+  assert(host.strip_rows > 0U &&
+         (picture_height / contract->raster_density) % host.line_rows == 0U);
   assert(8U * ((picture_height / contract->raster_density + host.strip_rows -
                 1U) /
                host.strip_rows) <= TAB5_MAX_STRIPS);
@@ -997,19 +1089,19 @@ static void run_app(void *unused) {
   mover_copy_config.dma_burst_size = 64;
   ESP_ERROR_CHECK(
       esp_async_memcpy_install_gdma_axi(&mover_copy_config, &host.mover_copy));
-  const uint32_t margin = host.picture_height < screen_height
-                             ? screen_height - host.origin_y - host.picture_height
-                             : screen_width - host.origin_x - host.picture_width;
-  if (margin > 2U * TAB5_BUTTON_INSET) {
-    host.button_size = margin - 2U * TAB5_BUTTON_INSET < TAB5_BUTTON_MAX
-                           ? margin - 2U * TAB5_BUTTON_INSET
-                           : TAB5_BUTTON_MAX;
-    host.button = heap_caps_aligned_alloc(128, button_bytes(host.button_size),
-                                          MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    assert(host.button != NULL);
-    host.button_shown = true;
-    paint_home_button(&host);
+  host.ball_px = TAB5_BALL_SIZE * contract->raster_density;
+  host.ball = (pocketjs_rgb565_rect_t){
+      .x = picture_width / contract->raster_density - TAB5_BALL_SIZE - TAB5_BALL_INSET,
+      .y = (picture_height / contract->raster_density - TAB5_BALL_SIZE) / 2U,
+      .width = TAB5_BALL_SIZE,
+      .height = TAB5_BALL_SIZE,
+  };
+  for (uint32_t face = 0; face < 2U; ++face) {
+    host.ball_faces[face] = heap_caps_aligned_alloc(
+        128, ball_bytes(host.ball_px), MALLOC_CAP_SPIRAM);
+    assert(host.ball_faces[face] != NULL);
   }
+  paint_ball(&host);
   host.moved = xSemaphoreCreateCounting(TAB5_MOVE_BACKLOG, 0);
   host.written = xSemaphoreCreateCounting(2, 0);
   host.move_state = xEventGroupCreate();
@@ -1078,7 +1170,7 @@ void app_main(void) {
   /* Evaluating Clear needs about 100 KB of stack. A PSRAM stack leaves the
    * internal RAM to the four strips. */
   const BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
-      run_app, "pocketjs_app", 128U * 1024U, NULL, 1, NULL, 0,
+      run_app, "pocketjs_app", TAB5_GUEST_STACK, NULL, 1, NULL, 0,
       MALLOC_CAP_SPIRAM);
   assert(created == pdPASS);
 }
