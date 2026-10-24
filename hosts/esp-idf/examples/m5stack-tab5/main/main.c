@@ -1040,20 +1040,22 @@ static void run_app(void *unused) {
       last = (pocketjs_runner_stats_t){.struct_size = sizeof(last)};
       continue;
     }
-    if (esp_timer_get_time() - logged < 5000000)
+    const int64_t now = esp_timer_get_time();
+    if (now - logged < 5000000)
       continue;
     const uint32_t frames = stats.frames - last.frames;
     ESP_LOGI(TAG,
              "fps=%.1f skipped=%" PRIu32 " errors=%" PRIu32
              " frame_avg_ms=%.2f frame_max_ms=%.2f",
-             frames / 5.0, stats.frames_skipped - last.frames_skipped,
+             frames * 1e6 / (double)(now - logged),
+             stats.frames_skipped - last.frames_skipped,
              stats.frame_errors - last.frame_errors,
              frames > 0U ? host.frame_us / 1000.0 / frames : 0.0,
              host.frame_max_us / 1000.0);
     host.frame_us = 0;
     host.frame_max_us = 0;
     last = stats;
-    logged = esp_timer_get_time();
+    logged = now;
   }
 }
 
