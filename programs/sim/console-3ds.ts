@@ -46,6 +46,10 @@ export interface Console3dsOptions {
   agent?: { available?: boolean; display?: AgentDisplay };
   /** Virtual epoch at boot, ms. Default 2026-10-19T01:41:00Z. */
   epochMs?: number;
+  /** The auxiliary surface's logical size: the touch screen of a launcher
+   *  host. Default BOTTOM_SCREEN; an adaptive applet runs at others (the
+   *  M5Stack Tab5 offers 360x592). */
+  auxiliary?: [number, number];
 }
 
 export interface Console3ds {
@@ -151,6 +155,7 @@ export async function bootConsole3ds(options: Console3dsOptions): Promise<Consol
     }
   };
 
+  const touchScreen = options.auxiliary ?? BOTTOM_SCREEN;
   const g = globalThis as Record<string, unknown>;
   g.link = linkHost?.ns;
   g.wifi = wifiHost?.ns;
@@ -164,7 +169,7 @@ export async function bootConsole3ds(options: Console3dsOptions): Promise<Consol
   const booting = bootBundle({
       js: options.js,
       pak: options.pak,
-      viewport: { width: TOP_SCREEN[0], height: TOP_SCREEN[1], auxiliary: BOTTOM_SCREEN },
+      viewport: { width: TOP_SCREEN[0], height: TOP_SCREEN[1], auxiliary: touchScreen },
       ops(ops) {
         ops.appTable = () =>
           JSON.stringify({
@@ -236,14 +241,14 @@ export async function bootConsole3ds(options: Console3dsOptions): Promise<Consol
       await step({ buttons: button });
       await run(settle);
     },
-    texts: (surface = "primary") => flatTexts(world.tree(surface), surface === "auxiliary" ? BOTTOM_SCREEN : TOP_SCREEN, []),
+    texts: (surface = "primary") => flatTexts(world.tree(surface), surface === "auxiliary" ? touchScreen : TOP_SCREEN, []),
     tree: (surface = "primary") => world.tree(surface),
-    locate: (text, surface = "auxiliary") => locateText(world.tree(surface), text, surface === "auxiliary" ? BOTTOM_SCREEN : TOP_SCREEN),
+    locate: (text, surface = "auxiliary") => locateText(world.tree(surface), text, surface === "auxiliary" ? touchScreen : TOP_SCREEN),
     async tapText(text) {
-      const rect = locateText(world.tree("auxiliary"), text, BOTTOM_SCREEN);
+      const rect = locateText(world.tree("auxiliary"), text, touchScreen);
       if (!rect) throw new Error(`console-3ds: "${text}" is not on the bottom screen`);
-      const x = Math.max(1, Math.min(BOTTOM_SCREEN[0] - 2, rect[0] + Math.min(rect[2], 40) / 2));
-      const y = Math.max(1, Math.min(BOTTOM_SCREEN[1] - 2, rect[1] + rect[3] / 2));
+      const x = Math.max(1, Math.min(touchScreen[0] - 2, rect[0] + Math.min(rect[2], 40) / 2));
+      const y = Math.max(1, Math.min(touchScreen[1] - 2, rect[1] + rect[3] / 2));
       for (let frame = 0; frame < 3; frame++) await step({ touches: [{ x, y }], surface: "auxiliary" });
       await run(2);
     },

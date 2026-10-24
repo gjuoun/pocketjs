@@ -131,6 +131,28 @@ function resolveFixedDisplay(
     : null;
 }
 
+/** An adaptive auxiliary surface takes the first size the target offers
+ *  inside its range, presented natively. */
+function resolveAdaptiveDisplay(
+  requested: { min: Viewport; max: Viewport },
+  provided: FixedDisplayProfile,
+  path: string,
+  diagnostics?: ContractDiagnostic[],
+): ReturnType<typeof resolveFixedDisplay> {
+  const logical = provided.logicalViewports.find((size) => within(size, requested.min, requested.max));
+  if (!logical) {
+    diagnostics?.push({
+      code: "surface.logicalUnsupported",
+      path,
+      message:
+        `target offers no auxiliary logical viewport from ${requested.min[0]}x${requested.min[1]} ` +
+        `through ${requested.max[0]}x${requested.max[1]}`,
+    });
+    return null;
+  }
+  return resolveFixedDisplay({ logical, presentation: "native" }, provided, path, diagnostics);
+}
+
 /** The app's viewport intent, normalized: the bare `{logical, presentation}`
  *  spelling is shorthand for `{fixed: ...}`. */
 function normalizeViewport(viewport: PocketManifestV2["app"]["viewport"]): {
@@ -622,6 +644,13 @@ export function resolveBuildPlan(
     });
   }
 
+  if (declaredSurfaces && !declaredSurfaces.auxiliary.fixed === !declaredSurfaces.auxiliary.adaptive) {
+    diagnostics.push({
+      code: "surface.auxiliaryPolicy",
+      path: `${surfacesPath}/auxiliary`,
+      message: "surfaces.auxiliary declares exactly one of fixed and adaptive",
+    });
+  }
   let resolvedAuxiliary:
     | NonNullable<ResolvedBuildPlanContent["surfaces"]>["auxiliary"]
     | undefined;
@@ -630,12 +659,21 @@ export function resolveBuildPlan(
     declaredSurfaces?.auxiliary &&
     profile.display.auxiliary
   ) {
-    resolvedAuxiliary = resolveFixedDisplay(
-      declaredSurfaces.auxiliary.fixed,
-      profile.display.auxiliary,
-      `${surfacesPath}/auxiliary/fixed`,
-      requires.has(AUXILIARY_DISPLAY) ? diagnostics : undefined,
-    ) ?? undefined;
+    const auxiliaryDiagnostics = requires.has(AUXILIARY_DISPLAY) ? diagnostics : undefined;
+    const { fixed, adaptive } = declaredSurfaces.auxiliary;
+    resolvedAuxiliary = (adaptive
+      ? resolveAdaptiveDisplay(
+          adaptive,
+          profile.display.auxiliary,
+          `${surfacesPath}/auxiliary/adaptive`,
+          auxiliaryDiagnostics,
+        )
+      : resolveFixedDisplay(
+          fixed!,
+          profile.display.auxiliary,
+          `${surfacesPath}/auxiliary/fixed`,
+          auxiliaryDiagnostics,
+        )) ?? undefined;
     if (!resolvedAuxiliary) {
       featureAvailability.set(AUXILIARY_DISPLAY, false);
       featureAvailability.set(AUXILIARY_TOUCH, false);
