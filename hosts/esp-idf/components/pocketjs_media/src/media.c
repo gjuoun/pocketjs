@@ -52,7 +52,10 @@ enum {
   ERR_DECODE,
   ERR_REMOTE
 };
-enum { VIDEO_SLOTS = 8, AUDIO_SLOTS = 24, COMMAND_SLOTS = 4 };
+/* The audio ring lets the stream run 24 blocks (1.1 s) ahead of the
+ * speaker; the frame ring covers that lead at 12 fps (1.3 s), or a frame
+ * that arrives early is dropped. */
+enum { VIDEO_SLOTS = 16, AUDIO_SLOTS = 24, COMMAND_SLOTS = 4 };
 /* Muted read-ahead: 9 PAL8 frames at 12 fps. */
 enum { SILENT_LEAD_MS = 750 };
 /* Audio buffered before playback starts or resumes after an underrun. */
@@ -296,6 +299,10 @@ static int open_socket(const command_t *cmd) {
   const struct timeval timeout = {.tv_sec = 0, .tv_usec = 100 * 1000};
   setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout);
   setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout);
+  /* A credit is one byte: it leaves when its packet is used, not when the
+   * previous credit's acknowledgement arrives. */
+  const int nodelay = 1;
+  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof nodelay);
   if (inet_pton(AF_INET, cmd->host, &address.sin_addr) != 1 ||
       connect(fd, (struct sockaddr *)&address, sizeof address) != 0) {
     close(fd);
