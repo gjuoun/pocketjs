@@ -35,7 +35,7 @@ import { BuildInputs } from "../framework/compiler/build-inputs.ts";
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { resolve as resolvePath, join, dirname } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { IMG_FLAG_LINEAR, PSM } from "../contracts/spec/spec.ts";
+import { IMG_FLAG_LINEAR, PSM, TEX_MAX_DIM } from "../contracts/spec/spec.ts";
 import {
   FRAMEWORKS,
   frameworkVariantPath,
@@ -52,7 +52,7 @@ import { registerAnimationTheme, setAnimationTickRate } from "../framework/compi
 import { compileClasses, generateStylesModule, suspectClassLiteral, unknownUtilities } from "../framework/compiler/tailwind.ts";
 import { bakeAtlases } from "../framework/compiler/bake-font.ts";
 import { readFontConfig } from "../framework/compiler/font-config.ts";
-import { bakeSvg } from "../framework/compiler/bake-svg.ts";
+import { bakeSvg, svgLogicalSize, svgTextureSize } from "../framework/compiler/bake-svg.ts";
 import {
   assertDensityVariantDimensions,
   densityVariantPath,
@@ -450,6 +450,9 @@ const imageMeta: Record<string, ImageMeta> = existsSync(imageManifestPath)
   ? (JSON.parse(await Bun.file(imageManifestPath).text()) as Record<string, ImageMeta>)
   : {};
 const imageNames = classStrings.filter((s) => /^[\w./-]+\.(?:png|svg)$/i.test(s));
+// SVGs whose density-scaled size is not a power of two (any density but a
+// power of two) bake at the nearest power-of-two dims and sample linear.
+const resampledImages = new Set<string>();
 for (const name of imageNames) {
   const candidates = [join(appDir, name), join(ROOT, "assets/images/", name), join(ROOT, "assets/", name)];
   candidates.forEach(path => buildInputs.optional(path));
@@ -457,9 +460,13 @@ for (const name of imageNames) {
   let img;
   if (found) {
     if (/\.svg$/i.test(found)) {
-      img = bakeSvg(await Bun.file(found).text(), rasterDensity);
+      const svg = await Bun.file(found).text();
+      const texture = svgTextureSize(svgLogicalSize(svg), rasterDensity, TEX_MAX_DIM);
+      img = bakeSvg(svg, rasterDensity, texture);
+      if (!texture.exact) resampledImages.add(name);
       console.log(
-        `  image: ${name} <- ${found} (${img.width}x${img.height}, svg @${rasterDensity}x)`,
+        `  image: ${name} <- ${found} (${img.width}x${img.height}, svg @${rasterDensity}x` +
+          `${texture.exact ? "" : ", resampled to power-of-two dims, sampled linear"})`,
       );
     } else {
       const base = decodePng(new Uint8Array(await Bun.file(found).arrayBuffer()));
@@ -507,7 +514,7 @@ for (const name of imageNames) {
     console.log(`  sprite: ${name} (${sp.frames} frames, ${sp.cols} cols, step ${sp.step}, psm ${sp.psm ?? PSM.PSM_8888})`);
   } else {
     const meta = imageMeta[name];
-    const flags = meta?.linear ? IMG_FLAG_LINEAR : 0;
+    const flags = meta?.linear || resampledImages.has(name) ? IMG_FLAG_LINEAR : 0;
     blobs.push({
       key: keyImage(name),
       dtype: PAK_DTYPE.u8,

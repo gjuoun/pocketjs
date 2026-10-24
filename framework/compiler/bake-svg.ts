@@ -306,7 +306,46 @@ function erase(px: Uint8Array, i: number, cov01: number): void {
   px[i + 3] = Math.round(px[i + 3] * (1 - cov01));
 }
 
-export function bakeSvg(svg: string, rasterDensity = 1): DecodedImage {
+/**
+ * Texture dims for an SVG of `logical` px at `rasterDensity`: the scaled size
+ * when it is a power of two within `maxDim`, otherwise the nearest power of
+ * two on each axis (capped at `maxDim`). Image quads sample the whole texture
+ * over their layout box, so a resampled texture keeps the drawn geometry.
+ */
+export function svgTextureSize(
+  logical: { width: number; height: number },
+  rasterDensity: number,
+  maxDim: number,
+): { width: number; height: number; exact: boolean } {
+  const fit = (n: number) => {
+    const scaled = n * rasterDensity;
+    if ((scaled & (scaled - 1)) === 0 && scaled <= maxDim) return scaled;
+    const below = 2 ** Math.floor(Math.log2(scaled));
+    const nearest = scaled / below < (below * 2) / scaled ? below : below * 2;
+    return Math.min(maxDim, Math.max(1, nearest));
+  };
+  const width = fit(logical.width);
+  const height = fit(logical.height);
+  return {
+    width,
+    height,
+    exact: width === logical.width * rasterDensity && height === logical.height * rasterDensity,
+  };
+}
+
+/** The `width`/`height` the root <svg> declares, in logical px. */
+export function svgLogicalSize(svg: string): { width: number; height: number } {
+  const svgTag = svg.match(/<svg\b[^>]*>/i)?.[0];
+  if (!svgTag) throw new Error("svg bake: missing <svg>");
+  const root = attrs(svgTag);
+  return { width: Math.round(num(root.width, "width")), height: Math.round(num(root.height, "height")) };
+}
+
+export function bakeSvg(
+  svg: string,
+  rasterDensity = 1,
+  texture?: { width: number; height: number },
+): DecodedImage {
   if (!Number.isInteger(rasterDensity) || rasterDensity < 1 || rasterDensity > 255) {
     throw new RangeError(
       `svg bake: rasterDensity must be an integer from 1 through 255 (got ${rasterDensity})`,
@@ -320,8 +359,8 @@ export function bakeSvg(svg: string, rasterDensity = 1): DecodedImage {
   if (logicalWidth <= 0 || logicalHeight <= 0) {
     throw new Error(`svg bake: bad dimensions ${logicalWidth}x${logicalHeight}`);
   }
-  const width = logicalWidth * rasterDensity;
-  const height = logicalHeight * rasterDensity;
+  const width = texture?.width ?? logicalWidth * rasterDensity;
+  const height = texture?.height ?? logicalHeight * rasterDensity;
   const viewBox = (root.viewBox ?? `0 0 ${logicalWidth} ${logicalHeight}`).trim().split(/\s+/).map(Number);
   if (viewBox.length !== 4 || viewBox.some((n) => !Number.isFinite(n))) {
     throw new Error(`svg bake: invalid viewBox="${root.viewBox}"`);
