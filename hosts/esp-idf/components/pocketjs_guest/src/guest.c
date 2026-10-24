@@ -303,6 +303,7 @@ esp_err_t pocketjs_guest_eval(pocketjs_guest_t *guest, const char *source,
       source_size == 0U) {
     return ESP_ERR_INVALID_ARG;
   }
+  JS_UpdateStackTop(guest->runtime);
   JSValue result =
       JS_Eval(guest->context, source, source_size,
               label != NULL ? label : "<pocket-app>", JS_EVAL_TYPE_GLOBAL);
@@ -365,6 +366,9 @@ esp_err_t pocketjs_guest_frame(pocketjs_guest_t *guest,
   if (!JS_IsFunction(guest->context, guest->frame)) {
     return ESP_ERR_INVALID_STATE;
   }
+  /* The stack limit counts from the calling task's stack: a frame may run
+   * on another task than the one that created the runtime. */
+  JS_UpdateStackTop(guest->runtime);
   JSValue arguments[5] = {
       JS_NewUint32(guest->context, frame->buttons),
       JS_NewUint32(guest->context, frame->analog),
