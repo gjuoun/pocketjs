@@ -82,9 +82,7 @@ export interface PocketManifestV2 {
     readonly viewport: ManifestViewport;
     /** Additional UI output intent. Physical geometry remains target-owned. */
     readonly surfaces?: {
-      readonly auxiliary: {
-        readonly fixed: FixedViewportSpec;
-      };
+      readonly auxiliary: AuxiliarySurfaceSpec;
     };
     /**
      * Companion service names the app's svc adapters speak (the exact
@@ -123,9 +121,7 @@ export interface PresentationSpec {
   readonly modality: ModalityRequirement;
   readonly viewport?: ManifestViewport;
   readonly surfaces?: {
-    readonly auxiliary: {
-      readonly fixed: FixedViewportSpec;
-    };
+    readonly auxiliary: AuxiliarySurfaceSpec;
   };
   /** Added to `engine.capabilities`; a presentation `requires` entry may
    *  promote an app-level `enhances` entry. */
@@ -140,6 +136,22 @@ export interface FixedViewportSpec {
   readonly logical: Viewport;
   readonly presentation: PresentationMode;
 }
+
+/**
+ * An auxiliary surface the application lays out at any logical size from
+ * `min` through `max`: the target presents its own auxiliary size when that
+ * size lies in the range, at native presentation. The application reads the
+ * size at run time (`auxiliaryViewport()`).
+ */
+export interface AdaptiveViewportSpec {
+  readonly min: Viewport;
+  readonly max: Viewport;
+}
+
+/** `fixed` requires the target's size; `adaptive` takes it. One of the two. */
+export type AuxiliarySurfaceSpec =
+  | { readonly fixed: FixedViewportSpec; readonly adaptive?: undefined }
+  | { readonly adaptive: AdaptiveViewportSpec; readonly fixed?: undefined };
 
 /** A dynamic-window viewport declaration (window/widget targets). */
 export interface DynamicViewportSpec {
@@ -191,9 +203,15 @@ const surfacesSchema = {
     auxiliary: {
       type: "object",
       additionalProperties: false,
-      required: ["fixed"],
+      description: "Exactly one of fixed and adaptive (checked at resolution).",
       properties: {
         fixed: fixedViewportSchema,
+        adaptive: {
+          type: "object",
+          additionalProperties: false,
+          required: ["min", "max"],
+          properties: { min: viewportSizeSchema, max: viewportSizeSchema },
+        },
       },
     },
   },
