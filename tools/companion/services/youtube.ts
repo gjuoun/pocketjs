@@ -315,6 +315,9 @@ async function* mediaPackets(tools: YoutubeTools, video: ResolvedVideo, codec: M
   }
 }
 
+/** The program a command line runs: past an `env VAR=value` prefix. */
+const program = (command: string[]): string => command.find((part, index) => !(index === 0 && part === "/usr/bin/env") && !/^\w+=/.test(part)) ?? command[0]!;
+
 /** `tools` names the programs, or looks them up on each use (the default:
  *  the companion's own copies, else the Mac's), so a fetch takes effect at
  *  once. */
@@ -481,13 +484,13 @@ export function createYoutubeService(context: ServiceContext, tools?: YoutubeToo
       }
       if (verb !== "status") return "youtube commands: status, install";
       const found = lookup();
-      return found ? `yt-dlp: ${found.ytDlp.find((part) => part.endsWith("yt-dlp"))}\nffmpeg: ${found.ffmpeg[0]}` : "yt-dlp or ffmpeg is missing: bun tools/companion.ts service youtube install";
+      return found ? `yt-dlp: ${program(found.ytDlp)}\nffmpeg: ${found.ffmpeg[0]}` : "yt-dlp or ffmpeg is missing: bun tools/companion.ts service youtube install";
     },
     async state() {
       const found = lookup();
       return {
         ready: found !== null,
-        ytDlp: found?.ytDlp.find((part) => part.endsWith("yt-dlp")) ?? null,
+        ytDlp: found ? program(found.ytDlp) : null,
         ffmpeg: found?.ffmpeg[0] ?? null,
         managed: managed.ytDlp !== null,
         install: managed.install,
