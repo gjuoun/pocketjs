@@ -262,6 +262,23 @@ impl DisplayOutput for CDisplay {
         let raw = c_rect(destination);
         check(unsafe { callback(self.context, &raw, dx, dy) }).map_err(display_error)
     }
+    fn host_damage(&mut self, out: &mut [Rect; HOST_DAMAGE_RECTS]) -> usize {
+        let Some(callback) = self.table.host_damage else {
+            return 0;
+        };
+        let mut raw = [PocketRect::empty(); HOST_DAMAGE_RECTS];
+        let mut count = 0usize;
+        if unsafe { callback(self.context, raw.as_mut_ptr(), HOST_DAMAGE_RECTS, &mut count) }
+            != POCKET_STATUS_OK
+        {
+            return 0;
+        }
+        let count = count.min(HOST_DAMAGE_RECTS);
+        for (slot, rect) in out.iter_mut().zip(&raw[..count]) {
+            *slot = Rect::new(rect.x, rect.y, rect.width, rect.height);
+        }
+        count
+    }
 }
 impl Drop for CDisplay {
     fn drop(&mut self) {

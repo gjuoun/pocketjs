@@ -38,6 +38,19 @@ typedef struct {
 pocket_display_esp_dpi *
 pocket_display_esp_dpi_create(const pocket_display_esp_dpi_config *);
 const pocket_display_output_v1 *pocket_display_esp_dpi_vtable(void);
+/* A host overlay the display blends into every presented region that covers
+ * it: a `size` x `size` square of ARGB8888 texels (straight alpha) at raster
+ * position (x, y) of the picture. The display reports the overlay's rows as
+ * host damage when its texels or place change and when a move carries its
+ * pixels along, so the picture under it repaints with the overlay on top.
+ * The texels stay the caller's; NULL removes the overlay. Call between
+ * frames on the task that runs the runtime. */
+typedef struct {
+  uint32_t x, y, size;
+  const uint32_t *argb;
+} pocket_display_esp_dpi_overlay;
+void pocket_display_esp_dpi_set_overlay(pocket_display_esp_dpi *,
+                                        const pocket_display_esp_dpi_overlay *);
 size_t pocket_display_esp_dpi_buffer_bytes(const pocket_display_esp_dpi *);
 /* A staging buffer the program may borrow while no frame is in flight (for
  * example to paint a host overlay); NULL when index is not 0 or 1. */

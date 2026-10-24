@@ -5,8 +5,8 @@
  *
  * With TAB5_LAUNCHER the embedded application is Pocket Home: the firmware
  * keeps a store of installed apps (pocket_system), switches between them,
- * and draws a home button in the margin beside the picture that sends
- * SELECT (or summons the launcher from an app). */
+ * and floats a home ball over the picture that sends SELECT (or summons the
+ * launcher from an app). */
 #include <assert.h>
 #include <inttypes.h>
 #include <math.h>
@@ -59,11 +59,18 @@ static const char *TAG = "pocketjs_tab5";
 #define TAB5_MAX_CONTACTS 5U
 /* QuickJS heap of the guest. */
 #define TAB5_GUEST_HEAP (24U * 1024U * 1024U)
-/* The home button drawn in the margin right of (or below) a picture smaller
- * than the screen: at most a square this many screen pixels wide, 4 pixels
- * inside the margin on each side, and the SELECT bit it sends. */
-#define TAB5_BUTTON_MAX 88U
-#define TAB5_BUTTON_INSET 4U
+/* The stack of the task running guest frames, and of the task evaluating
+ * the guest: Solid's reactive graph recurses through the stack in a tick
+ * (Home's Settings page passes 64 KB). QuickJS stops a script this far
+ * below the top with a RangeError, before the task's guard page. */
+#define TAB5_GUEST_STACK (192U * 1024U)
+#define TAB5_GUEST_STACK_LIMIT (144U * 1024U)
+/* The home ball floats over the picture at the middle of its right edge: a
+ * translucent disc this many logical pixels wide, this far from the edge,
+ * blended into every presented strip that covers it, sending SELECT on
+ * release. */
+#define TAB5_BALL_SIZE 56U
+#define TAB5_BALL_INSET 8U
 /* Where the launcher keeps installed apps: the microSD card when one is in
  * the slot, the `storage` flash partition otherwise. */
 #define TAB5_STORE "/pocket"
@@ -112,11 +119,14 @@ typedef struct {
   uint32_t origin_y;
   /* Panel pixels per logical pixel. */
   float unit;
-  /* The home button in the margin right of (or below) the picture. */
-  uint32_t button_size;
-  bool button_shown;
-  bool button_pressed;
-  bool button_released;
+  /* The home ball: its rectangle in logical pixels, its faces (resting,
+   * pressed) as ARGB8888 rasters the display blends into strips, and its
+   * touch state. */
+  pocket_rect ball;
+  uint32_t ball_px;
+  uint32_t *ball_faces[2];
+  bool ball_pressed;
+  bool ball_released;
   uint32_t contacts[TAB5_MAX_CONTACTS];
   uint32_t contact_count;
   tab5_guest_t running;
@@ -136,58 +146,30 @@ static uint32_t screen_height(const tab5_host_t *host) {
   return host->turned ? BSP_LCD_H_RES : BSP_LCD_V_RES;
 }
 
-/* ---- the home button ---------------------------------------------------- */
+/* ---- the home ball ------------------------------------------------------- */
 
-/* The button's top-left corner on the oriented screen: centered in the
- * margin right of the picture, or below it when the picture is as wide as
- * the screen. */
-static void home_button_origin(const tab5_host_t *host, uint32_t *x, uint32_t *y) {
-  const uint32_t size = host->button_size;
-  const uint32_t right = host->origin_x + host->picture_width;
-  if (right < screen_width(host)) {
-    *x = right + (screen_width(host) - right - size) / 2U;
-    *y = (screen_height(host) - size) / 2U;
-    return;
-  }
-  const uint32_t bottom = host->origin_y + host->picture_height;
-  *x = (screen_width(host) - size) / 2U;
-  *y = bottom + (screen_height(host) - bottom - size) / 2U;
-}
-
-/* The whole margin right of (or below) the picture answers, so a thumb need
- * not aim; the margin left of (or above) it does not. */
-static bool on_home_button(const tab5_host_t *host, int32_t x, int32_t y) {
-  if (host->origin_x + host->picture_width < screen_width(host))
-    return x >= (int32_t)(host->origin_x + host->picture_width);
-  return y >= (int32_t)(host->origin_y + host->picture_height);
-}
-
-static uint16_t rgb565(uint32_t r, uint32_t g, uint32_t b) {
-  return (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
-}
-
-/* Coverage of one pixel by the button's disc and by the rounded square
- * drawn on it, from 4x4 samples. The proportions are those of the 88-pixel
- * button; the stroke stays at least 1.5 pixels wide. */
-static void button_coverage(uint32_t size, float px, float py, float *disc,
-                            float *mark) {
-  const float unit = size / (float)TAB5_BUTTON_MAX;
-  const float center = size / 2.0f;
-  const float radius = 40.0f * unit;
-  const float half = 13.0f * unit;
-  const float corner = 5.5f * unit;
-  const float stroke = fmaxf(2.5f * unit, 1.5f);
+/* Coverage of one raster pixel by the ball's disc and by the rounded square
+ * drawn on it, from 4x4 samples. The proportions are those of the 56-pixel
+ * ball. */
+static void ball_coverage(uint32_t px, float x, float y, float *disc,
+                          float *mark) {
+  const float unit = px / (float)TAB5_BALL_SIZE;
+  const float center = px / 2.0f;
+  const float radius = 27.0f * unit;
+  const float half = 8.5f * unit;
+  const float corner = 3.5f * unit;
+  const float stroke = fmaxf(1.8f * unit, 1.2f);
   uint32_t in_disc = 0;
   uint32_t in_mark = 0;
   for (uint32_t sy = 0; sy < 4U; ++sy) {
     for (uint32_t sx = 0; sx < 4U; ++sx) {
-      const float x = px + (sx + 0.5f) / 4.0f - center;
-      const float y = py + (sy + 0.5f) / 4.0f - center;
-      if (x * x + y * y <= radius * radius)
+      const float dx = x + (sx + 0.5f) / 4.0f - center;
+      const float dy = y + (sy + 0.5f) / 4.0f - center;
+      if (dx * dx + dy * dy <= radius * radius)
         ++in_disc;
       /* Signed distance to the rounded square's outline. */
-      const float qx = fabsf(x) - (half - corner);
-      const float qy = fabsf(y) - (half - corner);
+      const float qx = fabsf(dx) - (half - corner);
+      const float qy = fabsf(dy) - (half - corner);
       const float ox = qx > 0.0f ? qx : 0.0f;
       const float oy = qy > 0.0f ? qy : 0.0f;
       const float inside = fminf(fmaxf(qx, qy), 0.0f);
@@ -200,36 +182,53 @@ static void button_coverage(uint32_t size, float px, float py, float *disc,
   *mark = in_mark / 16.0f;
 }
 
-/* Paint the home button in its pressed or resting state straight into the
- * framebuffer: screen (x, y) of a turned picture is panel (y, 1279 - x). */
-static void paint_home_button(tab5_host_t *host) {
-  const uint32_t size = host->button_size;
-  const float face = host->button_pressed ? 70.0f : 30.0f;
-  uint32_t left;
-  uint32_t top;
-  home_button_origin(host, &left, &top);
-  for (uint32_t y = 0; y < size; ++y) {
-    for (uint32_t x = 0; x < size; ++x) {
-      float disc;
-      float mark;
-      button_coverage(size, (float)x, (float)y, &disc, &mark);
-      const float level = disc * face + mark * (142.0f - face);
-      const uint16_t pixel = rgb565((uint32_t)level, (uint32_t)level,
-                                    (uint32_t)(level * 1.03f));
-      const uint32_t sx = left + x;
-      const uint32_t sy = top + y;
-      const uint32_t px = host->turned ? sy : sx;
-      const uint32_t py = host->turned ? BSP_LCD_V_RES - 1U - sx : sy;
-      host->framebuffer[py * BSP_LCD_H_RES + px] = pixel;
+/* Paint the ball's two faces: a dark translucent disc with a light rounded
+ * square on it, the disc lighter while pressed. */
+static void paint_ball(tab5_host_t *host) {
+  const uint32_t px = host->ball_px;
+  for (uint32_t face = 0; face < 2U; ++face) {
+    const float level = face ? 118.0f : 36.0f;
+    uint32_t *out = host->ball_faces[face];
+    for (uint32_t y = 0; y < px; ++y) {
+      for (uint32_t x = 0; x < px; ++x) {
+        float disc;
+        float mark;
+        ball_coverage(px, (float)x, (float)y, &disc, &mark);
+        const float disc_alpha = disc * 0.74f;
+        const float mark_alpha = mark * 0.95f;
+        /* The mark over the disc, straight alpha. */
+        const float alpha = mark_alpha + disc_alpha * (1.0f - mark_alpha);
+        const float value =
+            alpha > 0.0f
+                ? (236.0f * mark_alpha + level * disc_alpha * (1.0f - mark_alpha)) / alpha
+                : 0.0f;
+        const uint32_t grey = (uint32_t)value;
+        const uint32_t blue = (uint32_t)fminf(value * 1.03f, 255.0f);
+        out[y * px + x] = ((uint32_t)(alpha * 255.0f) << 24) | (grey << 16) |
+                          (grey << 8) | blue;
+      }
     }
   }
-  /* The rows the button touches, whole cache lines. */
-  const uint32_t first = host->turned ? BSP_LCD_V_RES - left - size : top;
-  const size_t offset = (size_t)first * BSP_LCD_H_RES * sizeof(uint16_t);
-  const size_t bytes = (size_t)size * BSP_LCD_H_RES * sizeof(uint16_t);
-  esp_cache_msync((uint8_t *)host->framebuffer + (offset & ~(size_t)127U),
-                  (bytes + 255U) & ~(size_t)127U,
-                  ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+}
+
+/* Whether a logical point lies on the ball's disc. */
+static bool on_ball(const tab5_host_t *host, float x, float y) {
+  const float dx = x - (host->ball.x + TAB5_BALL_SIZE / 2.0f);
+  const float dy = y - (host->ball.y + TAB5_BALL_SIZE / 2.0f);
+  const float radius = TAB5_BALL_SIZE / 2.0f;
+  return dx * dx + dy * dy <= radius * radius;
+}
+
+/* Hand the display the face of the ball's current state. */
+static void show_ball(tab5_host_t *host) {
+  const uint32_t density = (uint32_t)(host->ball_px / TAB5_BALL_SIZE);
+  const pocket_display_esp_dpi_overlay overlay = {
+      .x = host->ball.x * density,
+      .y = host->ball.y * density,
+      .size = host->ball_px,
+      .argb = host->ball_faces[host->ball_pressed ? 1 : 0],
+  };
+  pocket_display_esp_dpi_set_overlay(host->display, &overlay);
 }
 
 /* ---- input --------------------------------------------------------------- */
@@ -240,9 +239,9 @@ static uint32_t input_classes(void *context) {
          (TAB5_LAUNCHER ? POCKET_INPUT_CLASS_BUTTONS : 0U);
 }
 
-/* Contacts on the picture in logical pixels; a contact in the margin presses
- * the home button, which sends SELECT on release. A failed read cancels the
- * contacts the previous sample reported. */
+/* Contacts on the picture in logical pixels; a contact on the ball is the
+ * ball's, not the picture's, and sends SELECT on release. A failed read
+ * cancels the contacts the previous sample reported. */
 static int32_t input_poll(void *context, pocket_input_frame_builder *builder) {
   tab5_host_t *host = context;
   if (!host || !builder || builder->struct_size < sizeof(*builder) ||
@@ -258,7 +257,7 @@ static int32_t input_poll(void *context, pocket_input_frame_builder *builder) {
   pocket_cancelled_contact cancelled[TAB5_MAX_CONTACTS];
   size_t contact_count = 0;
   size_t cancelled_count = 0;
-  bool on_button = false;
+  bool on_ball_now = false;
   if (!read) {
     for (uint32_t i = 0; i < host->contact_count; i++)
       cancelled[cancelled_count++] = (pocket_cancelled_contact){
@@ -274,30 +273,32 @@ static int32_t input_poll(void *context, pocket_input_frame_builder *builder) {
     const int32_t x = sx - (int32_t)host->origin_x;
     const int32_t y = sy - (int32_t)host->origin_y;
     if (x < 0 || y < 0 || x >= (int32_t)host->picture_width ||
-        y >= (int32_t)host->picture_height) {
-      on_button |= host->button_shown && on_home_button(host, sx, sy);
+        y >= (int32_t)host->picture_height)
+      continue;
+    const pocket_contact contact = {.struct_size = sizeof(pocket_contact),
+                                    .surface = host->surface,
+                                    .id = points[i].track_id,
+                                    .x = (float)x / host->unit,
+                                    .y = (float)y / host->unit};
+    if (host->ball_faces[0] && on_ball(host, contact.x, contact.y)) {
+      on_ball_now = true;
       continue;
     }
-    contacts[contact_count++] = (pocket_contact){
-        .struct_size = sizeof(pocket_contact),
-        .surface = host->surface,
-        .id = points[i].track_id,
-        .x = (float)x / host->unit,
-        .y = (float)y / host->unit};
+    contacts[contact_count++] = contact;
   }
-  /* The button acts on release, like a key: one tick of SELECT. Outside
-   * the launcher it summons the launcher instead. */
-  uint32_t buttons = host->button_released ? POCKET_BUTTON_SELECT : 0U;
+  /* The ball acts on release, like a key: one tick of SELECT. Outside the
+   * launcher it summons the launcher instead. */
+  uint32_t buttons = host->ball_released ? POCKET_BUTTON_SELECT : 0U;
 #if TAB5_LAUNCHER
   if (buttons != 0U && !pocketjs_system_launcher_running()) {
     pocketjs_system_summon();
     buttons = 0U;
   }
 #endif
-  host->button_released = host->button_pressed && !on_button;
-  if (on_button != host->button_pressed) {
-    host->button_pressed = on_button;
-    paint_home_button(host);
+  host->ball_released = host->ball_pressed && !on_ball_now;
+  if (on_ball_now != host->ball_pressed) {
+    host->ball_pressed = on_ball_now;
+    show_ball(host);
   }
   const pocket_input_frame frame = {
       .struct_size = sizeof(frame),
@@ -548,7 +549,7 @@ static int32_t boot_guest(tab5_host_t *host, const uint8_t *bytes, size_t size,
     return POCKET_STATUS_FAILED;
   const pocket_guest_idf_config guest_config = {
       .heap_limit = TAB5_GUEST_HEAP,
-      .stack_limit = 256U * 1024U,
+      .stack_limit = TAB5_GUEST_STACK_LIMIT,
       .prefer_psram = true,
   };
   running->guest = pocket_guest_idf_create(&guest_config);
@@ -612,8 +613,7 @@ static int32_t boot_guest(tab5_host_t *host, const uint8_t *bytes, size_t size,
     return status;
   pocket_runner_config_t runner_config;
   pocket_runner_config_defaults(&runner_config);
-  /* Solid's reactive graph recurses through the stack in a tick. */
-  runner_config.task_stack_bytes = 64U * 1024U;
+  runner_config.task_stack_bytes = TAB5_GUEST_STACK;
   runner_config.task_stack_caps = MALLOC_CAP_SPIRAM;
   runner_config.task_core = 0;
   runner_config.interrupt = interrupt_guest;
@@ -777,11 +777,21 @@ static void run_app(void *unused) {
   move_config.backlog = TAB5_MOVE_BACKLOG;
   move_config.dma_burst_size = 64;
   ESP_ERROR_CHECK(esp_async_memcpy_install_gdma_axi(&move_config, &move_copy));
-  /* A turned strip presented by the PPA is at least 8 raster rows tall: the
-   * PPA stops completing 90-degree presents of blocks 4 or 6 raster rows
-   * tall while the panel scans out (measured on ESP32-P4 rev 1.3; 2 and 8 to
-   * 28 rows complete). Unturned strips keep whole 128-byte cache lines. */
-  host.quantum = host.turned ? 8U : 4U;
+  /* PPA operands span whole 128-byte cache lines: a strip holds a count of
+   * rows whose bytes are a multiple of 128 (four 1184-byte rows, one
+   * 1280-byte row, four 1440-byte rows). A turned strip presented by the
+   * PPA is also at least 8 raster rows tall: the PPA stops completing
+   * 90-degree presents of blocks 4 or 6 raster rows tall while the panel
+   * scans out (measured on ESP32-P4 rev 1.3; 2 and 8 to 28 rows
+   * complete). */
+  uint32_t line_rows = 1U;
+  while ((line_rows * width * 2U) % 128U != 0U)
+    ++line_rows;
+  host.quantum = line_rows;
+  if (host.turned)
+    while (host.quantum % 8U != 0U || host.quantum % line_rows != 0U)
+      ++host.quantum;
+  assert(height % host.quantum == 0U);
   size_t strip_budget = TAB5_STRIP_BYTES;
   if (TAB5_LAUNCHER) {
     /* The launcher's radio, store and link take internal RAM outside the
@@ -834,16 +844,25 @@ static void run_app(void *unused) {
       .min_srm_pixels = 256,
       .mask_budget = strip_budget / 2U,
   };
-  const uint32_t margin =
-      host.picture_width < screen_width(&host)
-          ? screen_width(&host) - host.origin_x - host.picture_width
-          : screen_height(&host) - host.origin_y - host.picture_height;
-  if (margin > 2U * TAB5_BUTTON_INSET) {
-    host.button_size = margin - 2U * TAB5_BUTTON_INSET < TAB5_BUTTON_MAX
-                           ? margin - 2U * TAB5_BUTTON_INSET
-                           : TAB5_BUTTON_MAX;
-    host.button_shown = true;
-    paint_home_button(&host);
+  if (TAB5_LAUNCHER) {
+    const uint32_t density = picture->raster_density;
+    const uint32_t logical_width = width / density;
+    const uint32_t logical_height = height / density;
+    host.ball_px = TAB5_BALL_SIZE * density;
+    host.ball = (pocket_rect){
+        .struct_size = sizeof(pocket_rect),
+        .x = logical_width - TAB5_BALL_SIZE - TAB5_BALL_INSET,
+        .y = (logical_height - TAB5_BALL_SIZE) / 2U,
+        .width = TAB5_BALL_SIZE,
+        .height = TAB5_BALL_SIZE,
+    };
+    for (uint32_t face = 0; face < 2U; ++face) {
+      host.ball_faces[face] = heap_caps_malloc(
+          (size_t)host.ball_px * host.ball_px * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
+      assert(host.ball_faces[face] != NULL);
+    }
+    paint_ball(&host);
+    show_ball(&host);
   }
   ESP_LOGI(TAG, "%s: %" PRIu32 "x%" PRIu32 " %s at %" PRIu32 "x, strips of %" PRIu32 " rows",
            pocket_profile.id, width, height, host.turned ? "turned" : "upright",
@@ -902,10 +921,10 @@ static void run_app(void *unused) {
 }
 
 void app_main(void) {
-  /* Evaluating Clear needs about 100 KB of stack. A PSRAM stack leaves the
-   * internal RAM to the staging strips. */
+  /* Evaluating a guest recurses as deep as running its frames. A PSRAM stack
+   * leaves the internal RAM to the staging strips. */
   const BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
-      run_app, "pocketjs_app", 128U * 1024U, NULL, 1, NULL, 0,
+      run_app, "pocketjs_app", TAB5_GUEST_STACK, NULL, 1, NULL, 0,
       MALLOC_CAP_SPIRAM);
   assert(created == pdPASS);
 }

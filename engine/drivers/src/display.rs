@@ -311,9 +311,23 @@ pub trait DisplayOutput {
     /// `destination` takes the value of the pixel at `(-dx, -dy)` from it.
     /// Called after [`frame_identity`](Self::frame_identity) and before the
     /// frame's first acquire; the move completes before any later flush
-    /// writes. An error leaves `destination` undefined.
+    /// writes. `Unsupported` declines this move: the pixels stay and
+    /// presentation repaints `destination`. Any other error leaves
+    /// `destination` undefined.
     fn move_pixels(&mut self, destination: Rect, dx: i32, dy: i32) -> Result<(), DisplayError> {
         let _ = (destination, dx, dy);
         Err(DisplayError::Unsupported)
     }
+    /// Physical rectangles the display needs repainted this frame besides
+    /// the frame's own damage: a host overlay whose face changed, or whose
+    /// pixels a move carried along. Called once per frame after
+    /// [`frame_identity`](Self::frame_identity) and the frame's move, before
+    /// its first acquire. Returns how many of `out` it filled.
+    fn host_damage(&mut self, out: &mut [Rect; HOST_DAMAGE_RECTS]) -> usize {
+        let _ = out;
+        0
+    }
 }
+
+/// Rectangles one [`DisplayOutput::host_damage`] call may report.
+pub const HOST_DAMAGE_RECTS: usize = 4;

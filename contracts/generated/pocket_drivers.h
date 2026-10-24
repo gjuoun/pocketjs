@@ -171,8 +171,11 @@ typedef int32_t (*pocket_display_wait_fn)(void * context, uint64_t token);
 
 typedef uint32_t (*pocket_display_vsync_fn)(void * context);
 
-/* RETAINED_MOVE displays only. Called after frame_identity and before the frame's first acquire: every retained pixel of destination takes the value of the pixel at (-dx, -dy) from it. The display completes the move before any later flush writes. An error leaves destination undefined; the runtime repaints the whole target next frame. */
+/* RETAINED_MOVE displays only. Called after frame_identity and before the frame's first acquire: every retained pixel of destination takes the value of the pixel at (-dx, -dy) from it. The display completes the move before any later flush writes. UNSUPPORTED declines this move: the pixels stay and the runtime repaints destination. Any other error leaves destination undefined; the runtime repaints the whole target next frame. */
 typedef int32_t (*pocket_display_move_fn)(void * context, const pocket_rect * destination, int32_t dx, int32_t dy);
+
+/* Optional. Called once per frame after frame_identity and the frame's move, before its first acquire: up to capacity physical rectangles the display needs repainted besides the frame's own damage, such as a host overlay whose face changed or whose pixels a move carried along. The runtime repaints them this frame. */
+typedef int32_t (*pocket_display_host_damage_fn)(void * context, pocket_rect * out, size_t capacity, size_t * count);
 
 typedef int32_t (*pocket_renderer_descriptor_fn)(void * context, pocket_renderer_descriptor * out);
 
@@ -1195,6 +1198,7 @@ struct pocket_display_output_v1 {
   pocket_display_vsync_fn vsync;
   pocket_display_frame_identity_fn frame_identity;
   pocket_display_move_fn move_pixels;
+  pocket_display_host_damage_fn host_damage;
 };
 enum {
   POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_0_OFFSET = POCKET_ABI_ALIGN_UP(0, POCKET_ABI_ALIGNOF(size_t)),
@@ -1213,10 +1217,12 @@ enum {
   POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_6_ALIGN = POCKET_ABI_MAX(POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_5_ALIGN, POCKET_ABI_ALIGNOF(pocket_display_frame_identity_fn)),
   POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_7_OFFSET = POCKET_ABI_ALIGN_UP(POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_6_OFFSET + sizeof(pocket_display_frame_identity_fn), POCKET_ABI_ALIGNOF(pocket_display_move_fn)),
   POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_7_ALIGN = POCKET_ABI_MAX(POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_6_ALIGN, POCKET_ABI_ALIGNOF(pocket_display_move_fn)),
-  POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_SIZE = POCKET_ABI_ALIGN_UP(POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_7_OFFSET + sizeof(pocket_display_move_fn), POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_7_ALIGN)
+  POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_8_OFFSET = POCKET_ABI_ALIGN_UP(POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_7_OFFSET + sizeof(pocket_display_move_fn), POCKET_ABI_ALIGNOF(pocket_display_host_damage_fn)),
+  POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_8_ALIGN = POCKET_ABI_MAX(POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_7_ALIGN, POCKET_ABI_ALIGNOF(pocket_display_host_damage_fn)),
+  POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_SIZE = POCKET_ABI_ALIGN_UP(POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_8_OFFSET + sizeof(pocket_display_host_damage_fn), POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_8_ALIGN)
 };
 POCKET_ABI_ASSERT(sizeof(pocket_display_output_v1) == POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_SIZE, "pocket_display_output_v1 size");
-POCKET_ABI_ASSERT(POCKET_ABI_ALIGNOF(pocket_display_output_v1) == POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_7_ALIGN, "pocket_display_output_v1 alignment");
+POCKET_ABI_ASSERT(POCKET_ABI_ALIGNOF(pocket_display_output_v1) == POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_8_ALIGN, "pocket_display_output_v1 alignment");
 POCKET_ABI_ASSERT(POCKET_ABI_OFFSETOF(pocket_display_output_v1, struct_size) == POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_0_OFFSET, "pocket_display_output_v1.struct_size");
 POCKET_ABI_ASSERT(POCKET_ABI_OFFSETOF(pocket_display_output_v1, descriptor) == POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_1_OFFSET, "pocket_display_output_v1.descriptor");
 POCKET_ABI_ASSERT(POCKET_ABI_OFFSETOF(pocket_display_output_v1, acquire) == POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_2_OFFSET, "pocket_display_output_v1.acquire");
@@ -1225,6 +1231,7 @@ POCKET_ABI_ASSERT(POCKET_ABI_OFFSETOF(pocket_display_output_v1, wait) == POCKET_
 POCKET_ABI_ASSERT(POCKET_ABI_OFFSETOF(pocket_display_output_v1, vsync) == POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_5_OFFSET, "pocket_display_output_v1.vsync");
 POCKET_ABI_ASSERT(POCKET_ABI_OFFSETOF(pocket_display_output_v1, frame_identity) == POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_6_OFFSET, "pocket_display_output_v1.frame_identity");
 POCKET_ABI_ASSERT(POCKET_ABI_OFFSETOF(pocket_display_output_v1, move_pixels) == POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_7_OFFSET, "pocket_display_output_v1.move_pixels");
+POCKET_ABI_ASSERT(POCKET_ABI_OFFSETOF(pocket_display_output_v1, host_damage) == POCKET_LAYOUT_POCKET_DISPLAY_OUTPUT_V1_8_OFFSET, "pocket_display_output_v1.host_damage");
 
 struct pocket_renderer_v1 {
   size_t struct_size;

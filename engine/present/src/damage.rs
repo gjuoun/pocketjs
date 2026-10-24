@@ -172,6 +172,20 @@ impl<const MAX_REGIONS: usize> DamagePlan<MAX_REGIONS> {
         self.motion
     }
 
+    /// Repaint `rect` (logical pixels) as well: a region the display asks
+    /// for, or a declined move's destination.
+    pub fn add_region(&mut self, rect: DamageRect) {
+        let screen = self.screen;
+        self.add(rect, screen);
+    }
+
+    /// Drop the plan's move: its destination is repainted instead.
+    pub fn repaint_motion(&mut self) {
+        if let Some(motion) = self.motion.take() {
+            self.add_region(motion.destination);
+        }
+    }
+
     /// Apply a backend-selected full-redraw threshold. A plan that moves
     /// pixels keeps them: promoting it would repaint the moved content.
     pub fn with_policy(mut self, policy: DamagePolicy) -> Result<Self, DamageError> {
