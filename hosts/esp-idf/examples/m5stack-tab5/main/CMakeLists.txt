@@ -10,6 +10,7 @@ idf_component_register(
         pocketjs_package
         pocketjs_render_rgb565
         pocketjs_runner
+        pocketjs_system
         pocketjs_ui_core
         pocketjs_ui_qjs
 )
@@ -27,6 +28,7 @@ if(POCKETJS_TAB5_APP STREQUAL "home")
         NAME app
         PACKAGE "${POCKETJS_TAB5_HOME_PACKAGE}"
         HOST_PROFILE "../home.host.json")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE TAB5_LAUNCHER=1)
 else()
     pocketjs_compile_app(
         TARGET ${COMPONENT_LIB}

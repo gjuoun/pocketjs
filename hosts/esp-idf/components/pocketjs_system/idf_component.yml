@@ -1,0 +1,12 @@
+version: "0.1.0"
+description: PocketJS launcher services on ESP-IDF (installed apps, Pocket Link, net, data.fs, Wi-Fi)
+license: MIT
+repository: https://github.com/pocket-nexus/pocketjs
+documentation: https://pocketjs.dev/docs/esp-idf/#system
+targets:
+  - esp32p4
+  - esp32s3
+dependencies:
+  idf: ">=6.0,<6.2"
+  pocket-nexus/pocketjs_guest: "0.1.0"
+  pocket-nexus/pocketjs_package: "0.1.0"

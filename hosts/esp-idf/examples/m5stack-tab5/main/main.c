@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "bsp/display.h"
+#include "bsp/m5stack_tab5.h"
 #include "bsp/touch.h"
 #include "driver/ppa.h"
 #include "esp_async_memcpy.h"
@@ -28,6 +29,7 @@
 #include "pocketjs/package.h"
 #include "pocketjs/render_rgb565.h"
 #include "pocketjs/runner.h"
+#include "pocketjs/system.h"
 #include "pocketjs/ui_core.h"
 #include "pocketjs/ui_qjs.h"
 #include "pocketjs_package_app.h"
@@ -53,6 +55,14 @@ static const char *TAG = "pocketjs_tab5";
  * bit it sends. */
 #define TAB5_BUTTON_SIZE 88U
 #define TAB5_BUTTON_SELECT 0x0001U
+/* The embedded app is a launcher (Pocket Home): it installs apps from the
+ * linked Mac and switches between them (pocketjs_system). */
+#ifndef TAB5_LAUNCHER
+#define TAB5_LAUNCHER 0
+#endif
+/* Where the launcher keeps installed apps: the microSD card when one is in
+ * the slot, the `storage` flash partition otherwise. */
+#define TAB5_STORE "/pocket"
 
 /* Each core runs one lane with its own renderer and PPA clients. One strip
  * renders while the other is presented; `idle` is given when a strip's
@@ -112,6 +122,9 @@ typedef struct {
   int64_t frame_started;
   uint64_t frame_us;
   uint32_t frame_max_us;
+  /* Launcher mode: the task that switches guests, woken by the runner. */
+  TaskHandle_t app_task;
+  bool switch_signalled;
 } tab5_host_t;
 
 static uint32_t oriented_height(const tab5_host_t *host) {
@@ -259,8 +272,20 @@ static esp_err_t sample_input(pocketjs_ui_input_t *input, void *user_data) {
     };
   }
   input->touches = touches;
-  /* The button acts on release, like a key: one frame of SELECT. */
+  /* The button acts on release, like a key: one frame of SELECT. Outside
+   * the launcher it summons the launcher instead. */
   input->buttons = host->button_released ? TAB5_BUTTON_SELECT : 0U;
+  if (TAB5_LAUNCHER) {
+    pocketjs_system_pump();
+    if (input->buttons != 0U && !pocketjs_system_launcher_running()) {
+      pocketjs_system_summon();
+      input->buttons = 0U;
+    }
+    if (pocketjs_system_switch_pending() && !host->switch_signalled) {
+      host->switch_signalled = true;
+      xTaskNotifyGive(host->app_task);
+    }
+  }
   host->button_released = host->button_pressed && !on_button;
   if (on_button != host->button_pressed) {
     host->button_pressed = on_button;
@@ -675,6 +700,173 @@ static void start_lane(tab5_lane_t *lane, uint32_t scale, size_t strip_bytes) {
 
 
 
+/* One running guest: its QuickJS realm, UI core, binding and runner. */
+typedef struct {
+  pocketjs_guest_t *guest;
+  pocketjs_ui_core_t *core;
+  pocketjs_ui_qjs_t *binding;
+  pocketjs_runner_t *runner;
+} tab5_guest_t;
+
+static void stop_guest(tab5_guest_t *running) {
+  if (running->runner != NULL)
+    ESP_ERROR_CHECK(pocketjs_runner_stop(running->runner));
+  /* The guest goes before its mounted binding. */
+  if (running->guest != NULL)
+    pocketjs_guest_destroy(running->guest);
+  if (running->binding != NULL)
+    pocketjs_ui_qjs_destroy(running->binding);
+  if (running->core != NULL)
+    pocketjs_ui_core_destroy(running->core);
+  *running = (tab5_guest_t){0};
+}
+
+/* Boot `app` and start its runner. `system_app` is the launcher's view of
+ * it in launcher mode, NULL otherwise. */
+static esp_err_t boot_guest(tab5_host_t *host,
+                            const pocketjs_package_variant_t *app,
+                            const pocketjs_system_app_t *system_app,
+                            tab5_guest_t *out) {
+  const pocketjs_package_host_contract_t *contract =
+      &pocketjs_package_app_contract;
+  tab5_guest_t running = {0};
+  pocketjs_guest_config_t guest_config;
+  pocketjs_guest_config_defaults(&guest_config);
+  esp_err_t result = pocketjs_guest_create(&guest_config, &running.guest);
+  pocketjs_ui_core_config_t core_config;
+  pocketjs_ui_core_config_defaults(&core_config);
+  core_config.logical_width = contract->logical_width;
+  core_config.logical_height = contract->logical_height;
+  core_config.raster_density = contract->raster_density;
+  core_config.tick_hz = contract->tick_hz;
+  if (result == ESP_OK)
+    result = pocketjs_ui_core_create(&core_config, &running.core);
+  const pocketjs_ui_qjs_config_t binding_config = {
+      .struct_size = sizeof(binding_config),
+      .target_id = contract->target_id,
+      .host_abi = contract->host_abi,
+      .auxiliary_width = contract->auxiliary_width,
+      .auxiliary_height = contract->auxiliary_height,
+  };
+  if (result == ESP_OK)
+    result = pocketjs_ui_qjs_create(running.guest, running.core,
+                                    &binding_config, &running.binding);
+  if (result == ESP_OK)
+    result = pocketjs_ui_qjs_feed_pak(running.binding, app->pak.data,
+                                      app->pak.size);
+  if (result == ESP_OK)
+    result = pocketjs_ui_qjs_mount(running.binding);
+  if (result == ESP_OK && system_app != NULL)
+    result = pocketjs_system_bind(running.guest, system_app);
+  if (result == ESP_OK)
+    result = pocketjs_guest_eval(running.guest,
+                                 (const char *)app->javascript.data,
+                                 app->javascript.size - 1U, "app");
+  pocketjs_runner_config_t runner_config;
+  pocketjs_runner_config_defaults(&runner_config);
+  /* Solid's reactive graph recurses through the stack in a turn. */
+  runner_config.task_stack_bytes = 64U * 1024U;
+  runner_config.task_stack_caps = MALLOC_CAP_SPIRAM;
+  runner_config.task_core = 0;
+  runner_config.sample_input = sample_input;
+  runner_config.after_turn = after_turn;
+  runner_config.user_data = host;
+  host->switch_signalled = false;
+  if (result == ESP_OK)
+    result = pocketjs_runner_start(running.binding, &runner_config,
+                                   &running.runner);
+  if (result != ESP_OK) {
+    stop_guest(&running);
+    if (system_app != NULL)
+      pocketjs_system_unbind();
+    return result;
+  }
+  *out = running;
+  return ESP_OK;
+}
+
+/* The next guest draws on a picture its renderers have never seen: fresh
+ * renderers (their caches key on the old core's texture handles) and a full
+ * first frame. */
+static void reset_renderers(tab5_host_t *host) {
+  for (size_t index = 0; index < 2U; ++index) {
+    tab5_lane_t *lane = &host->lanes[index];
+    pocketjs_rgb565_renderer_destroy(lane->renderer);
+    pocketjs_rgb565_renderer_config_t config;
+    pocketjs_rgb565_renderer_config_defaults(&config);
+    config.scale = pocketjs_package_app_contract.raster_density;
+    ESP_ERROR_CHECK(pocketjs_rgb565_renderer_create(&config, &lane->renderer));
+  }
+  pocketjs_rgb565_target_invalidate(host->target);
+}
+
+/* Replace the running guest with the one the launcher asked for, or with
+ * the launcher after `failed`. Returns the app now running. */
+static pocketjs_system_app_t *switch_guest(tab5_host_t *host,
+                                           tab5_guest_t *running,
+                                           pocketjs_system_app_t *app,
+                                           bool failed) {
+  stop_guest(running);
+  pocketjs_system_unbind();
+  pocketjs_system_app_free(app);
+  reset_renderers(host);
+  char slot[17] = {0};
+  bool launcher = true;
+  if (failed || !pocketjs_system_take_switch(slot, &launcher))
+    launcher = true;
+  pocketjs_system_app_t *next = NULL;
+  esp_err_t result = ESP_FAIL;
+  if (!launcher) {
+    result = pocketjs_system_load_slot(slot, &next);
+    if (result == ESP_OK) {
+      result = boot_guest(host, pocketjs_system_app_variant(next), next,
+                          running);
+      if (result != ESP_OK) {
+        pocketjs_system_app_free(next);
+        next = NULL;
+      }
+    }
+    if (result != ESP_OK) {
+      ESP_LOGE(TAG, "slot %s did not boot: %s", slot, esp_err_to_name(result));
+      pocketjs_system_report_failure("the app did not start");
+      reset_renderers(host);
+    }
+  }
+  if (result != ESP_OK) {
+    ESP_ERROR_CHECK(pocketjs_system_load_launcher(&next));
+    ESP_ERROR_CHECK(boot_guest(host, pocketjs_system_app_variant(next), next,
+                               running));
+  }
+  return next;
+}
+
+/* Storage, the radio's power and the system services of launcher mode. */
+static void start_system(void) {
+  /* The SDMMC controller drives the Wi-Fi coprocessor (esp_hosted), so the
+   * card is read over SPI. */
+  bsp_sdcard_cfg_t card = {0};
+  const bool on_card = bsp_sdcard_sdspi_mount(&card) == ESP_OK;
+  const char *root = on_card ? BSP_SD_MOUNT_POINT : TAB5_STORE;
+  const esp_err_t result =
+      on_card ? ESP_OK : pocketjs_system_mount_flash("storage", root);
+  ESP_LOGI(TAG, "store: %s at %s (%s)",
+           on_card ? "microSD card" : "flash partition", root,
+           esp_err_to_name(result));
+  ESP_ERROR_CHECK(result);
+  ESP_ERROR_CHECK(bsp_feature_enable(BSP_FEATURE_WIFI, true));
+  const pocketjs_system_config_t config = {
+      .struct_size = sizeof(config),
+      .contract = &pocketjs_package_app_contract,
+      .launcher = pocketjs_package_app.data,
+      .launcher_size = pocketjs_package_app.size,
+      .root = root,
+      .device_name = "M5Stack Tab5",
+      .device_model = "M5Stack Tab5",
+      .wifi = true,
+  };
+  ESP_ERROR_CHECK(pocketjs_system_start(&config));
+}
+
 static void run_app(void *unused) {
   static tab5_host_t host;
   const pocketjs_package_host_contract_t *contract =
@@ -700,42 +892,6 @@ static void run_app(void *unused) {
   host.picture_height = picture_height * host.scale;
   host.origin_x = 0U;
   host.origin_y = 0U;
-
-  pocketjs_package_t *package = NULL;
-  ESP_ERROR_CHECK(pocketjs_package_open(
-      pocketjs_package_app.data, pocketjs_package_app.size, 0, &package));
-  pocketjs_package_variant_t app = {.struct_size = sizeof(app)};
-  ESP_ERROR_CHECK(pocketjs_package_select(package, contract, &app));
-
-  pocketjs_guest_config_t guest_config;
-  pocketjs_guest_config_defaults(&guest_config);
-  pocketjs_guest_t *guest = NULL;
-  ESP_ERROR_CHECK(pocketjs_guest_create(&guest_config, &guest));
-
-  pocketjs_ui_core_config_t core_config;
-  pocketjs_ui_core_config_defaults(&core_config);
-  core_config.logical_width = contract->logical_width;
-  core_config.logical_height = contract->logical_height;
-  core_config.raster_density = contract->raster_density;
-  core_config.tick_hz = contract->tick_hz;
-  pocketjs_ui_core_t *core = NULL;
-  ESP_ERROR_CHECK(pocketjs_ui_core_create(&core_config, &core));
-
-  const pocketjs_ui_qjs_config_t binding_config = {
-      .struct_size = sizeof(binding_config),
-      .target_id = contract->target_id,
-      .host_abi = contract->host_abi,
-      .auxiliary_width = contract->auxiliary_width,
-      .auxiliary_height = contract->auxiliary_height,
-  };
-  pocketjs_ui_qjs_t *binding = NULL;
-  ESP_ERROR_CHECK(
-      pocketjs_ui_qjs_create(guest, core, &binding_config, &binding));
-  ESP_ERROR_CHECK(
-      pocketjs_ui_qjs_feed_pak(binding, app.pak.data, app.pak.size));
-  ESP_ERROR_CHECK(pocketjs_ui_qjs_mount(binding));
-  ESP_ERROR_CHECK(pocketjs_guest_eval(guest, (const char *)app.javascript.data,
-                                      app.javascript.size - 1U, "app"));
 
   /* Strip bytes per logical row of the raster. */
   const size_t row_bytes =
@@ -770,29 +926,48 @@ static void run_app(void *unused) {
   host.move_state = xEventGroupCreate();
   assert(host.moved != NULL && host.written != NULL &&
          host.move_state != NULL);
-
-  pocketjs_runner_config_t runner_config;
-  pocketjs_runner_config_defaults(&runner_config);
-  /* Solid's reactive graph recurses through the stack in a turn. */
-  runner_config.task_stack_bytes = 64U * 1024U;
-  runner_config.task_stack_caps = MALLOC_CAP_SPIRAM;
-  runner_config.task_core = 0;
-  runner_config.sample_input = sample_input;
-  runner_config.after_turn = after_turn;
-  runner_config.user_data = &host;
+  host.app_task = xTaskGetCurrentTaskHandle();
   /* The helper renders the second lane on core 1. */
-  const BaseType_t created =
-      xTaskCreatePinnedToCore(helper_task, "pocketjs_lane", 16U * 1024U, &host,
-                              runner_config.task_priority, &host.helper, 1);
+  const BaseType_t created = xTaskCreatePinnedToCore(
+      helper_task, "pocketjs_lane", 16U * 1024U, &host, 5, &host.helper, 1);
   assert(created == pdPASS);
-  pocketjs_runner_t *runner = NULL;
-  ESP_ERROR_CHECK(pocketjs_runner_start(binding, &runner_config, &runner));
+  if (TAB5_LAUNCHER)
+    start_system();
+
+  tab5_guest_t running = {0};
+  pocketjs_system_app_t *app = NULL;
+  if (TAB5_LAUNCHER) {
+    ESP_ERROR_CHECK(pocketjs_system_load_launcher(&app));
+    ESP_ERROR_CHECK(boot_guest(&host, pocketjs_system_app_variant(app), app,
+                               &running));
+  } else {
+    pocketjs_package_t *package = NULL;
+    ESP_ERROR_CHECK(pocketjs_package_open(
+        pocketjs_package_app.data, pocketjs_package_app.size, 0, &package));
+    static pocketjs_package_variant_t embedded = {.struct_size =
+                                                      sizeof(embedded)};
+    ESP_ERROR_CHECK(pocketjs_package_select(package, contract, &embedded));
+    ESP_ERROR_CHECK(boot_guest(&host, &embedded, NULL, &running));
+  }
 
   pocketjs_runner_stats_t last = {.struct_size = sizeof(last)};
+  int64_t logged = esp_timer_get_time();
   for (;;) {
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    const bool woken = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500)) != 0U;
     pocketjs_runner_stats_t stats = {.struct_size = sizeof(stats)};
-    ESP_ERROR_CHECK(pocketjs_runner_stats(runner, &stats));
+    ESP_ERROR_CHECK(pocketjs_runner_stats(running.runner, &stats));
+    if (TAB5_LAUNCHER && (woken || (stats.frame_errors != last.frame_errors &&
+                                    !pocketjs_system_app_is_launcher(app)))) {
+      /* An app that throws from a frame goes back to the launcher, which
+       * shows the failure once. */
+      if (!woken)
+        pocketjs_system_report_failure("the app stopped with an error");
+      app = switch_guest(&host, &running, app, !woken);
+      last = (pocketjs_runner_stats_t){.struct_size = sizeof(last)};
+      continue;
+    }
+    if (esp_timer_get_time() - logged < 5000000)
+      continue;
     const uint32_t frames = stats.frames - last.frames;
     ESP_LOGI(TAG,
              "fps=%.1f skipped=%" PRIu32 " errors=%" PRIu32
@@ -804,6 +979,7 @@ static void run_app(void *unused) {
     host.frame_us = 0;
     host.frame_max_us = 0;
     last = stats;
+    logged = esp_timer_get_time();
   }
 }
 
