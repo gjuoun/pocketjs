@@ -35,7 +35,9 @@ typedef struct {
   uint64_t installed;
 } LauncherApp;
 
-static LauncherApp apps[LAUNCHER_MAX_APPS];
+/* LAUNCHER_MAX_APPS rows, allocated on the first scan: a host with a
+ * second, larger heap keeps the table out of its scarce internal RAM. */
+static LauncherApp *apps;
 static size_t app_count;
 static bool table_dirty = true;
 
@@ -189,6 +191,8 @@ static LauncherApp *listed_output(const char *output) {
 
 static void rebuild_table(void) {
   app_count = 0;
+  if (apps == NULL) apps = calloc(LAUNCHER_MAX_APPS, sizeof *apps);
+  if (apps == NULL) return;
   table_dirty = false;
   DIR *directory = opendir(launcher_host_apps_directory());
   if (directory == NULL) return;

@@ -8,6 +8,12 @@
  * `package.pocket`. FAT refuses a rename onto an existing name, so the old
  * package is removed first: an interrupted install loses the app, never
  * leaves a package the firmware would refuse.
+ *
+ * Storage on the flash partition and the radio's NVS are flash, and a flash
+ * access disables the cache, which a task with its stack in PSRAM cannot
+ * survive. The guest's runner and the firmware's app task have PSRAM
+ * stacks, so every system operation runs on one task with an internal stack
+ * while its caller waits (system_run).
  */
 
 #include "pocketjs/system.h"
@@ -24,6 +30,9 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "esp_vfs_fat.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "fs.h"
 #include "host_services.h"
 #include "jscan.h"
@@ -35,6 +44,7 @@
 #define PACKAGE_NAME "package.pocket"
 #define STAGING_NAME "link-upload.pocket"
 #define SLOT_PATH_BYTES 128
+#define SYSTEM_TASK_STACK (12 * 1024)
 
 static const char *TAG = "pocketjs_system";
 
@@ -55,6 +65,49 @@ static char root_dir[64];
 static char apps_dir[80];
 static char link_dir[80];
 static char launcher_slot[17];
+
+// ---------------------------------------------------------------------------
+// the system task
+// ---------------------------------------------------------------------------
+
+static TaskHandle_t system_task;
+static SemaphoreHandle_t system_busy;
+static SemaphoreHandle_t system_job_ready;
+static SemaphoreHandle_t system_job_done;
+static void (*system_job)(void *);
+static void *system_job_context;
+
+static void system_main(void *unused) {
+  (void)unused;
+  for (;;) {
+    xSemaphoreTake(system_job_ready, portMAX_DELAY);
+    system_job(system_job_context);
+    xSemaphoreGive(system_job_done);
+  }
+}
+
+static bool system_task_start(void) {
+  if (system_task != NULL) return true;
+  system_busy = xSemaphoreCreateMutex();
+  system_job_ready = xSemaphoreCreateBinary();
+  system_job_done = xSemaphoreCreateBinary();
+  /* xTaskCreate takes the stack from internal RAM. */
+  return system_busy != NULL && system_job_ready != NULL && system_job_done != NULL &&
+         xTaskCreate(system_main, "pocketjs_sys", SYSTEM_TASK_STACK, NULL, 6, &system_task) == pdPASS;
+}
+
+void system_run(void (*job)(void *), void *context) {
+  if (system_task == NULL || xTaskGetCurrentTaskHandle() == system_task) {
+    job(context);
+    return;
+  }
+  xSemaphoreTake(system_busy, portMAX_DELAY);
+  system_job = job;
+  system_job_context = context;
+  xSemaphoreGive(system_job_ready);
+  xSemaphoreTake(system_job_done, portMAX_DELAY);
+  xSemaphoreGive(system_busy);
+}
 
 // ---------------------------------------------------------------------------
 // packages
@@ -308,14 +361,54 @@ bool link_host_data(uint32_t stream, const uint8_t *bytes, size_t length) {
 // pocketjs/system.h
 // ---------------------------------------------------------------------------
 
-esp_err_t pocketjs_system_mount_flash(const char *label, const char *root) {
-  const esp_vfs_fat_mount_config_t mount = {
+typedef struct {
+  const char *label;
+  const char *root;
+  esp_err_t result;
+} FlashMount;
+
+static void mount_flash(void *argument) {
+  FlashMount *mount = argument;
+  const esp_vfs_fat_mount_config_t options = {
       .format_if_mount_failed = true,
       .max_files = 8,
       .allocation_unit_size = CONFIG_WL_SECTOR_SIZE,
   };
   wl_handle_t handle = WL_INVALID_HANDLE;
-  return esp_vfs_fat_spiflash_mount_rw_wl(root, label, &mount, &handle);
+  mount->result = esp_vfs_fat_spiflash_mount_rw_wl(mount->root, mount->label, &options, &handle);
+}
+
+esp_err_t pocketjs_system_mount_flash(const char *label, const char *root) {
+  if (!system_task_start()) return ESP_ERR_NO_MEM;
+  FlashMount mount = { .label = label, .root = root, .result = ESP_FAIL };
+  system_run(mount_flash, &mount);
+  return mount.result;
+}
+
+/* The store's directories, the launcher's slot and the link's identity. */
+static void start_store(void *argument) {
+  esp_err_t *result = argument;
+  mkdir(apps_dir, 0777);
+  pocketjs_package_t *package = NULL;
+  pocketjs_package_variant_t variant = {0};
+  char error[160];
+  const uint8_t *bytes = config.launcher;
+  if (!open_package(bytes, config.launcher_size, &package, &variant, error, sizeof error)) {
+    ESP_LOGE(TAG, "launcher: %s", error);
+    *result = ESP_ERR_INVALID_ARG;
+    return;
+  }
+  LauncherPackage facts = facts_of(&variant, bytes, config.launcher_size);
+  char id[LAUNCHER_ID_BYTES];
+  if (!launcher_package_app_id(&facts, id, sizeof id)) {
+    pocketjs_package_close(package);
+    *result = ESP_ERR_INVALID_ARG;
+    return;
+  }
+  sha256_slot(id, strlen(id), launcher_slot);
+  launcher_init(launcher_slot, &facts);
+  pocketjs_package_close(package);
+  link_init();
 }
 
 esp_err_t pocketjs_system_start(const pocketjs_system_config_t *settings) {
@@ -328,27 +421,11 @@ esp_err_t pocketjs_system_start(const pocketjs_system_config_t *settings) {
   snprintf(root_dir, sizeof root_dir, "%s", settings->root);
   snprintf(apps_dir, sizeof apps_dir, "%s/apps", root_dir);
   snprintf(link_dir, sizeof link_dir, "%s/link", root_dir);
-  mkdir(apps_dir, 0777);
-
-  pocketjs_package_t *package = NULL;
-  pocketjs_package_variant_t variant = {0};
-  char error[160];
-  const uint8_t *bytes = settings->launcher;
-  if (!open_package(bytes, settings->launcher_size, &package, &variant, error, sizeof error)) {
-    ESP_LOGE(TAG, "launcher: %s", error);
-    return ESP_ERR_INVALID_ARG;
-  }
-  LauncherPackage facts = facts_of(&variant, bytes, settings->launcher_size);
-  char id[LAUNCHER_ID_BYTES];
-  if (!launcher_package_app_id(&facts, id, sizeof id)) {
-    pocketjs_package_close(package);
-    return ESP_ERR_INVALID_ARG;
-  }
-  sha256_slot(id, strlen(id), launcher_slot);
-  launcher_init(launcher_slot, &facts);
-  pocketjs_package_close(package);
-  link_init();
-  if (settings->wifi) wifi_start();
+  if (!system_task_start()) return ESP_ERR_NO_MEM;
+  esp_err_t result = ESP_OK;
+  system_run(start_store, &result);
+  if (result != ESP_OK) return result;
+  if (settings->wifi) wifi_start(settings->wifi_prepare);
   started = true;
   return ESP_OK;
 }
@@ -376,12 +453,25 @@ esp_err_t pocketjs_system_load_launcher(pocketjs_system_app_t **out_app) {
   return finish_app(app, config.launcher, config.launcher_size, out_app);
 }
 
+typedef struct {
+  const char *slot;
+  uint8_t *bytes;
+  size_t size;
+} SlotRead;
+
+static void read_slot(void *argument) {
+  SlotRead *read = argument;
+  char path[SLOT_PATH_BYTES];
+  if (launcher_host_slot_path(read->slot, PACKAGE_NAME, path, sizeof path)) read->bytes = read_file(path, &read->size);
+}
+
 esp_err_t pocketjs_system_load_slot(const char *slot, pocketjs_system_app_t **out_app) {
   if (!started || out_app == NULL || slot == NULL || strlen(slot) != 16) return ESP_ERR_INVALID_ARG;
   if (strcmp(slot, launcher_slot) == 0) return pocketjs_system_load_launcher(out_app);
-  char path[SLOT_PATH_BYTES];
-  size_t size = 0;
-  uint8_t *bytes = launcher_host_slot_path(slot, PACKAGE_NAME, path, sizeof path) ? read_file(path, &size) : NULL;
+  SlotRead read = { .slot = slot };
+  system_run(read_slot, &read);
+  uint8_t *bytes = read.bytes;
+  size_t size = read.size;
   if (bytes == NULL) return ESP_ERR_NOT_FOUND;
   pocketjs_system_app_t *app = calloc(1, sizeof *app);
   if (app == NULL) {
@@ -416,8 +506,8 @@ bool pocketjs_system_app_is_launcher(const pocketjs_system_app_t *app) {
   return app != NULL && app->launcher;
 }
 
-esp_err_t pocketjs_system_bind(pocketjs_guest_t *guest, const pocketjs_system_app_t *app) {
-  if (!started || guest == NULL || app == NULL) return ESP_ERR_INVALID_ARG;
+static void bind_app(void *argument) {
+  const pocketjs_system_app_t *app = argument;
   LauncherPackage facts = facts_of(&app->variant, app->bytes, app->size);
   /* The link names the running app in every net request; the guest's top
    * level may already fetch. */
@@ -437,16 +527,32 @@ esp_err_t pocketjs_system_bind(pocketjs_guest_t *guest, const pocketjs_system_ap
       }
     }
   }
+}
+
+esp_err_t pocketjs_system_bind(pocketjs_guest_t *guest, const pocketjs_system_app_t *app) {
+  if (!started || guest == NULL || app == NULL) return ESP_ERR_INVALID_ARG;
+  system_run(bind_app, (void *)app);
   return system_qjs_install(guest);
 }
 
-void pocketjs_system_unbind(void) {
+static void unbind(void *unused) {
+  (void)unused;
   link_reset_guest();
   fs_unbind();
 }
 
-void pocketjs_system_pump(void) {
+void pocketjs_system_unbind(void) {
+  system_run(unbind, NULL);
+}
+
+
+static void pump(void *unused) {
+  (void)unused;
   link_pump();
+}
+
+void pocketjs_system_pump(void) {
+  system_run(pump, NULL);
 }
 
 bool pocketjs_system_switch_pending(void) {

@@ -309,8 +309,8 @@ static void on_event(void *argument, esp_event_base_t base, int32_t id, void *da
   give();
 }
 
-static void bring_up(void *unused) {
-  (void)unused;
+static void bring_up(void *argument) {
+  esp_err_t (*prepare)(void) = (esp_err_t (*)(void))argument;
   esp_err_t result = nvs_flash_init();
   if (result == ESP_ERR_NVS_NO_FREE_PAGES || result == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     nvs_flash_erase();
@@ -323,7 +323,8 @@ static void bring_up(void *unused) {
   esp_event_loop_create_default();
   esp_netif_create_default_wifi_sta();
   wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
-  result = esp_wifi_init(&config);
+  result = prepare != NULL ? prepare() : ESP_OK;
+  if (result == ESP_OK) result = esp_wifi_init(&config);
   if (result == ESP_OK) result = esp_wifi_set_storage(WIFI_STORAGE_RAM);
   if (result == ESP_OK) result = esp_wifi_set_mode(WIFI_MODE_STA);
   esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_event, NULL);
@@ -347,10 +348,10 @@ static void bring_up(void *unused) {
 // the module
 // ---------------------------------------------------------------------------
 
-void wifi_start(void) {
+void wifi_start(esp_err_t (*prepare)(void)) {
   if (lock != NULL) return;
   lock = xSemaphoreCreateMutex();
-  xTaskCreate(bring_up, "pocketjs_wifi", 6 * 1024, NULL, 3, NULL);
+  xTaskCreate(bring_up, "pocketjs_wifi", 6 * 1024, (void *)prepare, 3, NULL);
 }
 
 static void status_network(JsonBuffer *out, const char *ssid, int strength, bool secure) {

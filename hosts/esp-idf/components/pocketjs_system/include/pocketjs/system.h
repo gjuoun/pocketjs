@@ -49,6 +49,9 @@ typedef struct {
   /** Bring the Wi-Fi radio up (esp_wifi through esp_wifi_remote on chips
    * without a radio of their own). */
   bool wifi;
+  /** Runs on the radio's task before esp_wifi_init, or NULL: power and
+   * connect a radio coprocessor. */
+  esp_err_t (*wifi_prepare)(void);
 } pocketjs_system_config_t;
 
 /** Open the store and the launcher package, start the link and the radio. */

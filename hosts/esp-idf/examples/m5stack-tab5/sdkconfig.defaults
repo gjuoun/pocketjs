@@ -24,6 +24,12 @@ CONFIG_ESP_HOSTED_HOST_SDIO_PIN_D1=10
 CONFIG_ESP_HOSTED_HOST_SDIO_PIN_D2=9
 CONFIG_ESP_HOSTED_HOST_SDIO_PIN_D3=8
 CONFIG_ESP_HOSTED_HOST_RESET_GPIO=15
+# Launcher mode starts the link (main.c start_coprocessor) after the render
+# strips hold their internal RAM; the radio's stacks and buffers go to PSRAM.
+CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n
+CONFIG_ESP_HOSTED_DFLT_TASK_FROM_SPIRAM=y
+CONFIG_EH_HOST_PORT_DMA_PREFER_SPIRAM=y
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 # The launcher's store: long names on FAT, the microSD card mounted where
 # the flash partition would be.
 CONFIG_FATFS_LFN_HEAP=y

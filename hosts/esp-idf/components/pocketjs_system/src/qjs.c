@@ -8,6 +8,9 @@
  *   globalThis.wifi                 contracts/spec/wifi.ts (wifi.c)
  *   globalThis.fs                   contracts/spec/fs.ts, when the guest's
  *                                   plan declares data.fs (fs.c)
+ *
+ * Each op reads its arguments on the guest's task and makes its C call on
+ * the system task (system_run).
  */
 
 #include <stdbool.h>
@@ -108,123 +111,220 @@ static bool argument_bytes(JSContext *ctx, int argc, JSValueConst *argv, int ind
   return true;
 }
 
-static JSValue text_or_undefined(JSContext *ctx, const char *text) {
-  return text == NULL ? JS_UNDEFINED : JS_NewString(ctx, text);
+/* One op's arguments and result. The C call runs on the system task
+ * (system_run): storage and NVS are flash, which a PSRAM stack cannot touch. */
+typedef enum { RESULT_UNDEFINED, RESULT_TEXT, RESULT_TEXT_OR_UNDEFINED, RESULT_INT, RESULT_BOOL } ResultKind;
+
+typedef struct {
+  int magic;
+  const char *text;
+  size_t length;
+  const char *second;
+  size_t second_length;
+  uint8_t *bytes;
+  size_t byte_length;
+  int32_t number;
+  double first_float;
+  double second_float;
+  ResultKind kind;
+  const char *out_text;
+  int32_t out_int;
+  bool out_bool;
+} Request;
+
+static void text_result(Request *request, const char *text) {
+  request->kind = RESULT_TEXT;
+  request->out_text = text;
 }
 
-static JSValue fs_line(JSContext *ctx, const char *line) {
-  return JS_NewString(ctx, line != NULL ? line : "{\"error\":\"out of memory\"}");
+static void fs_result(Request *request, const char *line) {
+  text_result(request, line != NULL ? line : "{\"error\":\"out of memory\"}");
+}
+
+static void int_result(Request *request, int32_t value) {
+  request->kind = RESULT_INT;
+  request->out_int = value;
+}
+
+static void bool_result(Request *request, bool value) {
+  request->kind = RESULT_BOOL;
+  request->out_bool = value;
+}
+
+static void perform(void *argument) {
+  Request *r = argument;
+  r->kind = RESULT_UNDEFINED;
+  switch (r->magic) {
+    case OP_APP_TABLE:
+      text_result(r, launcher_table_json());
+      break;
+    case OP_APP_LAUNCH:
+      int_result(r, r->text != NULL && launcher_launch(r->text) ? 1 : 0);
+      break;
+    case OP_APP_SHOT:
+      int_result(r, -1);
+      break;
+    case OP_LINK_STATUS:
+      text_result(r, link_status_json());
+      break;
+    case OP_LINK_PAIR:
+      bool_result(r, r->text != NULL && link_pair(r->text, r->length));
+      break;
+    case OP_LINK_FORGET:
+      bool_result(r, r->text != NULL && link_forget(r->text));
+      break;
+    case OP_LINK_REMOVE:
+      bool_result(r, r->text != NULL && link_remove(r->text, r->length));
+      break;
+    case OP_LINK_INSTALL:
+      int_result(r, r->text == NULL ? -1 : link_install(r->text, r->length));
+      break;
+    case OP_LINK_CATALOG:
+      int_result(r, link_catalog());
+      break;
+    case OP_LINK_POLL:
+      r->kind = RESULT_TEXT_OR_UNDEFINED;
+      r->out_text = link_poll();
+      break;
+    case OP_NET_START:
+      int_result(r, r->text == NULL ? -1 : link_net_start(r->text, r->length, r->bytes, r->byte_length));
+      break;
+    case OP_NET_TAKE:
+      int_result(r, r->bytes == NULL ? -1 : link_net_take(r->number, r->bytes, r->byte_length));
+      break;
+    case OP_NET_CANCEL:
+      link_net_cancel(r->number);
+      break;
+    case OP_NET_POLL:
+      r->kind = RESULT_TEXT_OR_UNDEFINED;
+      r->out_text = link_net_poll();
+      break;
+    case OP_NET_LAST_ERROR:
+      text_result(r, link_net_last_error());
+      break;
+    case OP_WIFI_STATUS:
+      text_result(r, wifi_status_json());
+      break;
+    case OP_WIFI_SET_ENABLED:
+      bool_result(r, wifi_set_enabled(r->number != 0));
+      break;
+    case OP_WIFI_CONNECT:
+      bool_result(r, wifi_connect(r->number));
+      break;
+    case OP_WIFI_SCAN:
+      bool_result(r, wifi_scan());
+      break;
+    case OP_WIFI_JOIN:
+      bool_result(r, r->text != NULL &&
+                         wifi_join(r->text, r->length, r->second != NULL ? r->second : "", r->second_length));
+      break;
+    case OP_WIFI_FORGET:
+      bool_result(r, wifi_forget(r->number));
+      break;
+    case OP_FS_READ:
+      fs_result(r, fs_read(r->text, r->length, r->first_float, r->second_float));
+      break;
+    case OP_FS_LIST:
+      fs_result(r, fs_list(r->text, r->length, r->first_float));
+      break;
+    case OP_FS_STAT:
+      fs_result(r, fs_stat(r->text, r->length));
+      break;
+    case OP_FS_WRITE:
+      int_result(r, fs_write(r->text, r->length, r->second, r->second_length, r->number));
+      break;
+    case OP_FS_REMOVE:
+      int_result(r, fs_remove(r->text, r->length, r->number));
+      break;
+    case OP_FS_MKDIR:
+      int_result(r, fs_mkdir(r->text, r->length));
+      break;
+    case OP_FS_RENAME:
+      int_result(r, fs_rename(r->text, r->length, r->second, r->second_length));
+      break;
+    case OP_FS_USAGE:
+      fs_result(r, fs_usage());
+      break;
+    case OP_FS_LAST_ERROR:
+      text_result(r, fs_last_error());
+      break;
+    default:
+      break;
+  }
 }
 
 static JSValue operation(JSContext *ctx, JSValueConst this_value, int argc, JSValueConst *argv, int magic) {
   (void)this_value;
-  size_t length = 0;
-  size_t second_length = 0;
-  const char *text = NULL;
-  const char *second = NULL;
-  uint8_t *bytes = NULL;
-  size_t byte_length = 0;
-  JSValue result = JS_UNDEFINED;
+  Request request = { .magic = magic };
   switch (magic) {
-    case OP_APP_TABLE:
-      return JS_NewString(ctx, launcher_table_json());
     case OP_APP_LAUNCH:
-      text = argument_text(ctx, argc, argv, 0, &length);
-      result = JS_NewInt32(ctx, text != NULL && launcher_launch(text) ? 1 : 0);
-      break;
-    case OP_APP_SHOT:
-      return JS_NewInt32(ctx, -1);
-    case OP_LINK_STATUS:
-      return JS_NewString(ctx, link_status_json());
     case OP_LINK_PAIR:
     case OP_LINK_FORGET:
     case OP_LINK_REMOVE:
-      text = argument_text(ctx, argc, argv, 0, &length);
-      if (text == NULL) return JS_FALSE;
-      result = JS_NewBool(ctx, magic == OP_LINK_PAIR     ? link_pair(text, length)
-                               : magic == OP_LINK_FORGET ? link_forget(text)
-                                                         : link_remove(text, length));
-      break;
     case OP_LINK_INSTALL:
-      text = argument_text(ctx, argc, argv, 0, &length);
-      result = JS_NewInt32(ctx, text == NULL ? -1 : link_install(text, length));
+    case OP_FS_STAT:
+    case OP_FS_MKDIR:
+      request.text = argument_text(ctx, argc, argv, 0, &request.length);
       break;
-    case OP_LINK_CATALOG:
-      return JS_NewInt32(ctx, link_catalog());
-    case OP_LINK_POLL:
-      return text_or_undefined(ctx, link_poll());
     case OP_NET_START:
-      text = argument_text(ctx, argc, argv, 0, &length);
-      if (text == NULL) return JS_NewInt32(ctx, -1);
-      /* Borrowed after the string conversion and used before JS runs:
+      request.text = argument_text(ctx, argc, argv, 0, &request.length);
+      /* Borrowed after the string conversion and used before JS runs again:
        * start() copies the body. */
-      if (!argument_bytes(ctx, argc, argv, 1, &bytes, &byte_length)) {
-        bytes = NULL;
-        byte_length = 0;
+      if (!argument_bytes(ctx, argc, argv, 1, &request.bytes, &request.byte_length)) {
+        request.bytes = NULL;
+        request.byte_length = 0;
       }
-      result = JS_NewInt32(ctx, link_net_start(text, length, bytes, byte_length));
       break;
     case OP_NET_TAKE:
-      if (!argument_bytes(ctx, argc, argv, 1, &bytes, &byte_length)) return JS_NewInt32(ctx, -1);
-      return JS_NewInt32(ctx, link_net_take(argument_int(ctx, argc, argv, 0), bytes, byte_length));
-    case OP_NET_CANCEL:
-      link_net_cancel(argument_int(ctx, argc, argv, 0));
-      return JS_UNDEFINED;
-    case OP_NET_POLL:
-      return text_or_undefined(ctx, link_net_poll());
-    case OP_NET_LAST_ERROR:
-      return JS_NewString(ctx, link_net_last_error());
-    case OP_WIFI_STATUS:
-      return JS_NewString(ctx, wifi_status_json());
-    case OP_WIFI_SET_ENABLED:
-      return JS_NewBool(ctx, wifi_set_enabled(argc > 0 && JS_ToBool(ctx, argv[0])));
-    case OP_WIFI_CONNECT:
-      return JS_NewBool(ctx, wifi_connect(argument_int(ctx, argc, argv, 0)));
-    case OP_WIFI_SCAN:
-      return JS_NewBool(ctx, wifi_scan());
-    case OP_WIFI_JOIN:
-      text = argument_text(ctx, argc, argv, 0, &length);
-      second = argument_text(ctx, argc, argv, 1, &second_length);
-      result = JS_NewBool(ctx, text != NULL && wifi_join(text, length, second != NULL ? second : "", second_length));
+      request.number = argument_int(ctx, argc, argv, 0);
+      if (!argument_bytes(ctx, argc, argv, 1, &request.bytes, &request.byte_length)) request.bytes = NULL;
       break;
+    case OP_NET_CANCEL:
+    case OP_WIFI_CONNECT:
     case OP_WIFI_FORGET:
-      return JS_NewBool(ctx, wifi_forget(argument_int(ctx, argc, argv, 0)));
+      request.number = argument_int(ctx, argc, argv, 0);
+      break;
+    case OP_WIFI_SET_ENABLED:
+      request.number = argc > 0 && JS_ToBool(ctx, argv[0]) ? 1 : 0;
+      break;
+    case OP_WIFI_JOIN:
+    case OP_FS_RENAME:
+      request.text = argument_text(ctx, argc, argv, 0, &request.length);
+      request.second = argument_text(ctx, argc, argv, 1, &request.second_length);
+      break;
     case OP_FS_READ:
     case OP_FS_LIST:
-    case OP_FS_STAT:
-      text = argument_text(ctx, argc, argv, 0, &length);
-      result = fs_line(ctx, magic == OP_FS_READ
-                                ? fs_read(text, length, argument_float(ctx, argc, argv, 1),
-                                          argument_float(ctx, argc, argv, 2))
-                            : magic == OP_FS_LIST ? fs_list(text, length, argument_float(ctx, argc, argv, 1))
-                                                  : fs_stat(text, length));
+      request.text = argument_text(ctx, argc, argv, 0, &request.length);
+      request.first_float = argument_float(ctx, argc, argv, 1);
+      request.second_float = argument_float(ctx, argc, argv, 2);
       break;
     case OP_FS_WRITE:
-      text = argument_text(ctx, argc, argv, 0, &length);
-      second = argument_text(ctx, argc, argv, 1, &second_length);
-      result = JS_NewInt32(ctx, fs_write(text, length, second, second_length, argument_int(ctx, argc, argv, 2)));
+      request.text = argument_text(ctx, argc, argv, 0, &request.length);
+      request.second = argument_text(ctx, argc, argv, 1, &request.second_length);
+      request.number = argument_int(ctx, argc, argv, 2);
       break;
     case OP_FS_REMOVE:
-    case OP_FS_MKDIR:
-      text = argument_text(ctx, argc, argv, 0, &length);
-      result = JS_NewInt32(ctx, magic == OP_FS_REMOVE ? fs_remove(text, length, argument_int(ctx, argc, argv, 1))
-                                                      : fs_mkdir(text, length));
+      request.text = argument_text(ctx, argc, argv, 0, &request.length);
+      request.number = argument_int(ctx, argc, argv, 1);
       break;
-    case OP_FS_RENAME:
-      text = argument_text(ctx, argc, argv, 0, &length);
-      second = argument_text(ctx, argc, argv, 1, &second_length);
-      result = JS_NewInt32(ctx, fs_rename(text, length, second, second_length));
-      break;
-    case OP_FS_USAGE:
-      return fs_line(ctx, fs_usage());
-    case OP_FS_LAST_ERROR:
-      return JS_NewString(ctx, fs_last_error());
     default:
       break;
   }
-  free_text(ctx, text);
-  free_text(ctx, second);
-  return result;
+  system_run(perform, &request);
+  free_text(ctx, request.text);
+  free_text(ctx, request.second);
+  switch (request.kind) {
+    case RESULT_TEXT:
+      return JS_NewString(ctx, request.out_text);
+    case RESULT_TEXT_OR_UNDEFINED:
+      return request.out_text == NULL ? JS_UNDEFINED : JS_NewString(ctx, request.out_text);
+    case RESULT_INT:
+      return JS_NewInt32(ctx, request.out_int);
+    case RESULT_BOOL:
+      return JS_NewBool(ctx, request.out_bool);
+    default:
+      return JS_UNDEFINED;
+  }
 }
 
 static void add(JSContext *ctx, JSValue object, const char *name, int arity, int magic) {

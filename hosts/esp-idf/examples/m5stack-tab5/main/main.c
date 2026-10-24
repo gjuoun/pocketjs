@@ -13,11 +13,13 @@
 #include "driver/ppa.h"
 #include "esp_async_memcpy.h"
 #include "esp_cache.h"
+#include "esp_hosted.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_touch.h"
+#include "esp_private/gdma.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -36,7 +38,8 @@
 
 static const char *TAG = "pocketjs_tab5";
 
-/* Bytes per strip: 24 logical rows of the portrait panel at density 2. */
+/* Bytes per strip at most: 24 logical rows of the portrait panel at density
+ * 2. A strip holds the whole logical rows that fit. */
 #define TAB5_STRIP_BYTES (720U * 48U * sizeof(uint16_t))
 /* Upper bound of strips in one frame: eight damage regions of up to 32
  * strips each (640 portrait rows / 24, 360 landscape rows / 13). */
@@ -89,6 +92,8 @@ typedef struct {
   uint32_t strip_count;
   atomic_uint next_strip;
   uint32_t strip_rows;
+  /* The bytes of one strip buffer: strip_rows logical rows. */
+  size_t strip_bytes;
   TaskHandle_t helper;
   TaskHandle_t runner;
   /* Moves retained framebuffer pixels when a plan carries a motion: whole
@@ -356,7 +361,7 @@ static esp_err_t copy_rows_down(tab5_host_t *host, uint32_t y0, uint32_t y1,
   const size_t row_bytes = BSP_LCD_H_RES * sizeof(uint16_t);
   uint16_t *framebuffer = host->framebuffer;
   async_memcpy_handle_t writer = host->lanes[1].copy;
-  const uint32_t band_rows = TAB5_STRIP_BYTES / row_bytes;
+  const uint32_t band_rows = host->strip_bytes / row_bytes;
   const uint32_t count = (y1 - y0 + band_rows - 1U) / band_rows;
   uint32_t reads = 0;
   uint32_t writes = 0;
@@ -441,7 +446,7 @@ static esp_err_t move_pixels(tab5_host_t *host,
                : copy_rows_down(host, y0, y1, (uint32_t)dy);
   }
   uint16_t *band = host->lanes[1].strips[0];
-  const size_t band_bytes = TAB5_STRIP_BYTES;
+  const size_t band_bytes = host->strip_bytes;
   const uint32_t w = x1 - x0;
   const uint32_t band_rows = band_bytes / (w * sizeof(uint16_t));
   for (uint32_t done = 0; done < y1 - y0;) {
@@ -840,12 +845,37 @@ static pocketjs_system_app_t *switch_guest(tab5_host_t *host,
   return next;
 }
 
-/* Storage, the radio's power and the system services of launcher mode. */
+/* The ESP32-C6 that carries Wi-Fi: power it, then bring up the SDIO link
+ * (esp_hosted starts here, not before app_main, so Hero and Clear never
+ * start it and the render strips are allocated first). */
+static esp_err_t start_coprocessor(void) {
+  ESP_RETURN_ON_ERROR(bsp_feature_enable(BSP_FEATURE_WIFI, true), TAG,
+                      "coprocessor power");
+  if (esp_hosted_init() != 0 || esp_hosted_connect_to_slave() != 0)
+    return ESP_FAIL;
+  return ESP_OK;
+}
+
+/* Storage and the system services of launcher mode. */
+/* The card's SPI bus takes an AXI GDMA pair, and spi_bus_initialize faults
+ * in its cleanup instead of failing when none is free: mount only after a
+ * probe finds one. */
+static bool axi_dma_free(void) {
+  const gdma_channel_alloc_config_t config = {0};
+  gdma_channel_handle_t tx = NULL;
+  gdma_channel_handle_t rx = NULL;
+  if (gdma_new_axi_channel(&config, &tx, &rx) != ESP_OK)
+    return false;
+  gdma_del_channel(tx);
+  gdma_del_channel(rx);
+  return true;
+}
+
 static void start_system(void) {
   /* The SDMMC controller drives the Wi-Fi coprocessor (esp_hosted), so the
    * card is read over SPI. */
   bsp_sdcard_cfg_t card = {0};
-  const bool on_card = bsp_sdcard_sdspi_mount(&card) == ESP_OK;
+  const bool on_card = axi_dma_free() && bsp_sdcard_sdspi_mount(&card) == ESP_OK;
   const char *root = on_card ? BSP_SD_MOUNT_POINT : TAB5_STORE;
   const esp_err_t result =
       on_card ? ESP_OK : pocketjs_system_mount_flash("storage", root);
@@ -853,7 +883,6 @@ static void start_system(void) {
            on_card ? "microSD card" : "flash partition", root,
            esp_err_to_name(result));
   ESP_ERROR_CHECK(result);
-  ESP_ERROR_CHECK(bsp_feature_enable(BSP_FEATURE_WIFI, true));
   const pocketjs_system_config_t config = {
       .struct_size = sizeof(config),
       .contract = &pocketjs_package_app_contract,
@@ -863,6 +892,7 @@ static void start_system(void) {
       .device_name = "M5Stack Tab5",
       .device_model = "M5Stack Tab5",
       .wifi = true,
+      .wifi_prepare = start_coprocessor,
   };
   ESP_ERROR_CHECK(pocketjs_system_start(&config));
 }
@@ -871,7 +901,6 @@ static void run_app(void *unused) {
   static tab5_host_t host;
   const pocketjs_package_host_contract_t *contract =
       &pocketjs_package_app_contract;
-  start_panel(&host);
   /* The picture is the auxiliary surface when the profile has one: the
    * primary surface stays laid out off screen. */
   const bool auxiliary = contract->auxiliary_width != 0U;
@@ -896,12 +925,25 @@ static void run_app(void *unused) {
   /* Strip bytes per logical row of the raster. */
   const size_t row_bytes =
       (size_t)picture_width * contract->raster_density * sizeof(uint16_t);
-  host.strip_rows = TAB5_STRIP_BYTES / row_bytes;
+  size_t strip_budget = TAB5_STRIP_BYTES;
+  if (TAB5_LAUNCHER) {
+    /* The launcher's radio, store and link take internal RAM outside the
+     * largest heap region: all four strips come from that region. */
+    const size_t block = heap_caps_get_largest_free_block(
+        MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (block / 4U - 128U < strip_budget)
+      strip_budget = block / 4U - 128U;
+  }
+  host.strip_rows = strip_budget / row_bytes;
+  host.strip_bytes = host.strip_rows * row_bytes;
   assert(8U * ((picture_height / contract->raster_density + host.strip_rows -
                 1U) /
                host.strip_rows) <= TAB5_MAX_STRIPS);
-  start_lane(&host.lanes[0], contract->raster_density, TAB5_STRIP_BYTES);
-  start_lane(&host.lanes[1], contract->raster_density, TAB5_STRIP_BYTES);
+  /* The four strips are the largest internal DMA blocks the firmware holds:
+   * take them before the panel and the radio's buffers split the heap. */
+  start_lane(&host.lanes[0], contract->raster_density, host.strip_bytes);
+  start_lane(&host.lanes[1], contract->raster_density, host.strip_bytes);
+  start_panel(&host);
   ESP_ERROR_CHECK(pocketjs_rgb565_target_create(&host.target));
   const ppa_client_config_t mover_config = {
       .oper_type = PPA_OPERATION_SRM,
