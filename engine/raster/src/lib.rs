@@ -385,7 +385,7 @@ fn fill_rect<T: RenderTarget>(target: &mut T, stride: i32, c: Clip, color: u32) 
 /// Integer lerp of two packed ABGR colors at f in [0,1] (round-to-nearest;
 /// f itself is a deterministic f32 pixel-center fraction).
 #[inline]
-fn lerp_color(from: u32, to: u32, f: f32) -> u32 {
+pub fn lerp_color(from: u32, to: u32, f: f32) -> u32 {
     let mix = |a: u32, b: u32| {
         let af = a as f32;
         (af + (b as f32 - af) * f + 0.5) as u32
@@ -1071,7 +1071,7 @@ fn glyph_run<T: RenderTarget>(
 /// an unknown psm (corrupt stream — callers abort the op, matching the old
 /// inline `_ => return` arms byte-for-byte on the known formats).
 #[inline]
-fn texel(view: &TexView, idx: usize) -> Option<(u32, u32, u32, u32)> {
+pub fn texel(view: &TexView, idx: usize) -> Option<(u32, u32, u32, u32)> {
     match view.psm {
         spec::psm::PSM_5650 => {
             // PSP PSM 5650: u16 LE, B5:G6:R5 (red in the low bits). Always
