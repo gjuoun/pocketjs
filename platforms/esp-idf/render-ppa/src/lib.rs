@@ -1088,13 +1088,32 @@ impl Painter {
         if view.psm == spec::psm::PSM_5650 {
             let logical = logical_rect(op[2], op[3]).intersect(clip);
             let destination_rect = local_physical_rect(logical, surface, self.config.scale);
-            if destination_rect.area() >= self.config.min_srm_pixels {
+            if !destination_rect.is_empty() {
                 if let Some((source_rect, mirror_x, mirror_y)) =
                     texture_source_rect(&view, op, logical)
                 {
                     let one_to_one = source_rect.w == destination_rect.w
                         && source_rect.h == destination_rect.h;
-                    if (one_to_one || view.linear) && op[8] == 0xffff_ffff {
+                    // An unscaled, unmirrored, untinted copy is a row loop
+                    // that swaps the red and blue fields. The PPA's SRM
+                    // engine is the one that presents the lanes' strips, so
+                    // a transaction waits behind them: about a millisecond
+                    // each on the Tab5, whatever the block's size.
+                    if one_to_one && !mirror_x && !mirror_y && op[8] == 0xffff_ffff {
+                        copy_psm5650_rect(
+                            view.pixels,
+                            view.w,
+                            source_rect,
+                            destination,
+                            width,
+                            destination_rect,
+                        );
+                        return Ok(Some(start + 9));
+                    }
+                    if destination_rect.area() >= self.config.min_srm_pixels
+                        && (one_to_one || view.linear)
+                        && op[8] == 0xffff_ffff
+                    {
                         let transform = SrmTransform {
                             mirror_x,
                             mirror_y,
@@ -1554,6 +1573,35 @@ fn fill_rgb565_rect(destination: &mut [u16], stride: u32, rect: Rect, color: u16
     for y in rect.y..rect.y + rect.h {
         let start = y as usize * stride as usize + rect.x as usize;
         fill_span(&mut destination[start..start + rect.w as usize], color);
+    }
+}
+
+/// Copy a PSM_5650 texture rect (little-endian u16, red in the low five
+/// bits) over an RGB565 rect of the same size, row by row, as the SRM path
+/// writes it with its red and blue fields swapped.
+fn copy_psm5650_rect(
+    pixels: &[u8],
+    texture_width: u32,
+    source: Rect,
+    destination: &mut [u16],
+    stride: u32,
+    target: Rect,
+) {
+    let w = source.w.min(target.w) as usize;
+    let h = source.h.min(target.h) as usize;
+    for row in 0..h {
+        let from = ((source.y as usize + row) * texture_width as usize + source.x as usize) * 2;
+        let to = (target.y as usize + row) * stride as usize + target.x as usize;
+        let Some(texels) = pixels.get(from..from + w * 2) else {
+            return;
+        };
+        let Some(out) = destination.get_mut(to..to + w) else {
+            return;
+        };
+        for (pixel, texel) in out.iter_mut().zip(texels.chunks_exact(2)) {
+            let value = u16::from_le_bytes([texel[0], texel[1]]);
+            *pixel = (value << 11) | (value & 0x07e0) | (value >> 11);
+        }
     }
 }
 
