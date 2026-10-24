@@ -297,6 +297,9 @@ pub struct Ui {
     stable_motion_paint: bool,
     /// Changes whenever raster-visible resource bytes or tables change.
     raster_revision: u64,
+    /// Changes with `raster_revision` except when a live texture's pixels
+    /// are overwritten in place (each texture's own revision records those).
+    resource_revision: u64,
     focused: i32,
     draw_list: DrawList,
     /// Virtual cursor sprite (spec ops 28/29, input.cursor capability):
@@ -382,6 +385,7 @@ impl Ui {
             raster_density,
             stable_motion_paint: false,
             raster_revision: 1,
+            resource_revision: 1,
             focused: 0,
             draw_list: DrawList::new(),
             cursor_tex: -1,
@@ -441,7 +445,21 @@ impl Ui {
         self.raster_revision
     }
 
+    /// [`raster_revision`](Self::raster_revision) less the in-place pixel
+    /// writes of live textures: a damage tracker that compares each sampled
+    /// texture's [`texture_revision`](Self::texture_revision) repaints only
+    /// the ops drawing an updated one while this stays.
+    pub fn resource_revision(&self) -> u64 {
+        self.resource_revision
+    }
+
     fn bump_raster_revision(&mut self) {
+        self.raster_revision = self.raster_revision.wrapping_add(1);
+        self.resource_revision = self.resource_revision.wrapping_add(1);
+    }
+
+    /// A live texture's pixels were overwritten in place.
+    fn bump_texture_content(&mut self) {
         self.raster_revision = self.raster_revision.wrapping_add(1);
     }
 
@@ -1148,7 +1166,7 @@ impl Ui {
             );
         }
         tex.revision = tex.revision.wrapping_add(1);
-        self.bump_raster_revision();
+        self.bump_texture_content();
         true
     }
 
@@ -1198,7 +1216,7 @@ impl Ui {
             }
         }
         tex.revision = tex.revision.wrapping_add(1);
-        self.bump_raster_revision();
+        self.bump_texture_content();
         true
     }
 

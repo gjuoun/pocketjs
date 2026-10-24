@@ -515,6 +515,7 @@ unsafe fn draw_surface(core: *mut NativeUiCore, out: *mut NativeFrameView, auxil
     let draw_words = words.as_ptr();
     let draw_word_count = words.len();
     let raster_revision = core.ui.raster_revision();
+    let resource_revision = core.ui.resource_revision();
     core.frame_words = draw_words;
     core.frame_word_count = draw_word_count;
     *out = NativeFrameView {
@@ -527,6 +528,7 @@ unsafe fn draw_surface(core: *mut NativeUiCore, out: *mut NativeFrameView, auxil
         draw_words,
         draw_word_count,
         private_core: core as *mut NativeUiCore as *mut c_void,
+        resource_revision,
     };
     0
 }

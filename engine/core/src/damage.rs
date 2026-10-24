@@ -345,6 +345,10 @@ pub struct DamageTracker<const MAX_REGIONS: usize = DEFAULT_DAMAGE_REGIONS> {
     words: Vec<u32>,
     target: DamageTarget,
     raster_revision: u64,
+    resource_revision: u64,
+    /// Textures `words` samples, each with the content revision it had when
+    /// committed: a texture overwritten in place repaints the ops drawing it.
+    textures: Vec<(i32, u64)>,
     valid: bool,
     /// Decoded operations of `words`, when `ops_valid`.
     ops: Vec<MotionOp>,
@@ -372,6 +376,8 @@ impl<const MAX_REGIONS: usize> DamageTracker<MAX_REGIONS> {
             words: Vec::new(),
             target: DamageTarget::new(0, 0, 0, 0),
             raster_revision: 0,
+            resource_revision: 0,
+            textures: Vec::new(),
             valid: false,
             ops: Vec::new(),
             ops_valid: false,
@@ -405,15 +411,39 @@ impl<const MAX_REGIONS: usize> DamageTracker<MAX_REGIONS> {
             return Err(DamageError::InvalidTarget);
         }
         let screen = target_screen(ui, target)?;
-        let full_redraw =
-            !self.valid || self.target != target || self.raster_revision != ui.raster_revision();
-        let damage = if full_redraw {
+        let Some(updated) = self.updated_textures(ui, target) else {
             validate_draw_list(ui, words, screen)?;
-            DamagePlan::full(screen)
-        } else {
-            draw_list_damage(ui, &self.words, words, screen)?
+            return Ok(DamagePlan::full(screen));
         };
+        let mut damage = draw_list_damage(ui, &self.words, words, screen)?;
+        if !updated.is_empty() {
+            let mut decoder = DamageDecoder::new(words, screen);
+            while let Some(op) = decoder.next(ui).map_err(|_| DamageError::MalformedDrawList)? {
+                if sampled_texture(op.code, op.words).is_some_and(|handle| updated.contains(&handle)) {
+                    damage.add(op.bounds, screen);
+                }
+            }
+        }
         Ok(damage)
+    }
+
+    /// Handles of committed textures whose pixels were overwritten in place
+    /// since the commit, or None when the target must be repainted whole:
+    /// no valid snapshot, another target, other resources changed, or a
+    /// texture revision the resources do not report.
+    fn updated_textures(&self, ui: &impl RenderResources, target: DamageTarget) -> Option<Vec<i32>> {
+        if !self.valid || self.target != target || self.resource_revision != ui.resource_revision() {
+            return None;
+        }
+        let mut updated = Vec::new();
+        if self.raster_revision != ui.raster_revision() {
+            for &(handle, revision) in &self.textures {
+                if ui.texture_revision(handle)? != revision {
+                    updated.push(handle);
+                }
+            }
+        }
+        Some(updated)
     }
 
     /// [`prepare`](Self::prepare) that may also return a [`DamageMotion`].
@@ -433,8 +463,10 @@ impl<const MAX_REGIONS: usize> DamageTracker<MAX_REGIONS> {
             return Err(DamageError::InvalidTarget);
         }
         let screen = target_screen(ui, target)?;
-        let full = !self.valid || self.target != target || self.raster_revision != ui.raster_revision();
-        if !full && same_words(&self.words, words) {
+        let updated = self.updated_textures(ui, target);
+        let full = updated.is_none();
+        let updated = updated.unwrap_or_default();
+        if !full && updated.is_empty() && same_words(&self.words, words) {
             return Ok(DamagePlan::empty(screen));
         }
         // The pending buffers hold nothing worth keeping until this returns.
@@ -447,7 +479,14 @@ impl<const MAX_REGIONS: usize> DamageTracker<MAX_REGIONS> {
                 decode_ops_into(ui, &self.words, screen, &mut self.ops)?;
                 self.ops_valid = true;
             }
-            motion_damage(&self.words, &self.ops, words, &self.pending_ops, screen, &mut self.scratch)
+            let mut plan =
+                motion_damage(&self.words, &self.ops, words, &self.pending_ops, screen, &mut self.scratch);
+            for op in &self.pending_ops {
+                if sampled_texture(op.code, &words[op.start..op.end]).is_some_and(|handle| updated.contains(&handle)) {
+                    plan.add(op.bounds, screen);
+                }
+            }
+            plan
         };
         self.pending_words.clear();
         self.pending_words.extend_from_slice(words);
@@ -493,7 +532,22 @@ impl<const MAX_REGIONS: usize> DamageTracker<MAX_REGIONS> {
         self.pending = false;
         self.target = target;
         self.raster_revision = ui.raster_revision();
+        self.resource_revision = ui.resource_revision();
         self.valid = true;
+        self.textures.clear();
+        let Ok(screen) = target_screen(ui, target) else { return };
+        let mut decoder = DamageDecoder::new(&self.words, screen);
+        while let Ok(Some(op)) = decoder.next(ui) {
+            let Some(handle) = sampled_texture(op.code, op.words) else { continue };
+            if self.textures.iter().any(|&(known, _)| known == handle) {
+                continue;
+            }
+            // Resources without texture revisions report every content
+            // change through resource_revision instead.
+            if let Some(revision) = ui.texture_revision(handle) {
+                self.textures.push((handle, revision));
+            }
+        }
     }
 }
 
@@ -666,6 +720,14 @@ fn draw_list_damage<const MAX_REGIONS: usize>(
         return Err(DamageError::MalformedDrawList);
     }
     Ok(damage)
+}
+
+/// The texture an operation samples.
+fn sampled_texture(code: u32, words: &[u32]) -> Option<i32> {
+    match code {
+        spec::draw_op::TEX_QUAD | spec::draw_op::TEX_TRI => words.get(1).map(|&handle| handle as i32),
+        _ => None,
+    }
 }
 
 /// Word-by-word equality. Comparing eight words at a time with XOR keeps
@@ -1403,6 +1465,36 @@ mod tests {
             .prepare(&ui, &[], target(4, 2, 1))
             .unwrap()
             .is_full_redraw());
+    }
+
+    #[test]
+    fn a_texture_overwritten_in_place_repaints_only_the_quads_sampling_it() {
+        let mut ui = Ui::new();
+        ui.set_viewport(64.0, 48.0);
+        let plane = ui.upload_texture(&[0u8; 4 * 4 * 2], 4, 4, spec::psm::PSM_5650);
+        let other = ui.upload_texture(&[0u8; 4 * 4 * 2], 4, 4, spec::psm::PSM_5650);
+        let quad = |handle: i32, x: i16| {
+            vec![spec::draw_op::TEX_QUAD, handle as u32, xy_word(x, 8), wh_word(16, 16), 0, 0, 0, 0, 0xffff_ffff]
+        };
+        let mut words = vec![spec::draw_op::RECT, xy_word(0, 0), wh_word(64, 48), 0xff20_1008];
+        words.extend(quad(plane, 4));
+        words.extend(quad(other, 40));
+        let mut tracker = DamageTracker::<DEFAULT_DAMAGE_REGIONS>::new();
+        tracker.commit(&ui, &words, target(64, 48, 1));
+
+        assert!(ui.update_texture_rect(plane, 0, 0, 2, 2, &[0xff; 8]));
+        let damage = tracker.prepare(&ui, &words, target(64, 48, 1)).unwrap();
+        assert!(!damage.is_full_redraw());
+        assert_eq!(damage.regions(), &[DamageRect::new(4, 8, 20, 24)]);
+        let moving = tracker.prepare_with_motion(&ui, &words, target(64, 48, 1)).unwrap();
+        assert_eq!(moving.regions(), &[DamageRect::new(4, 8, 20, 24)]);
+        assert!(moving.motion().is_none());
+
+        tracker.commit(&ui, &words, target(64, 48, 1));
+        assert!(tracker.prepare(&ui, &words, target(64, 48, 1)).unwrap().is_empty());
+        // Any other resource change still repaints the target.
+        assert!(ui.upload_texture(&[0u8; 2], 1, 1, spec::psm::PSM_5650) >= 0);
+        assert!(tracker.prepare(&ui, &words, target(64, 48, 1)).unwrap().is_full_redraw());
     }
 
     // ---- motion ----------------------------------------------------------

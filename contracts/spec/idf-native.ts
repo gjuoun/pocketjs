@@ -110,6 +110,11 @@ export const IDF_NATIVE_STRUCTS = [
         "name": "private_core",
         "cName": "_private_core",
         "type": "*mut c_void"
+      },
+      {
+        "name": "resource_revision",
+        "cName": "resource_revision",
+        "type": "u64"
       }
     ]
   },

@@ -31,6 +31,17 @@ impl FontView<'_> {
 pub trait RenderResources {
     fn viewport(&self) -> (f32, f32);
     fn raster_revision(&self) -> u64;
+    /// [`raster_revision`](Self::raster_revision) less in-place texture
+    /// pixel writes ([`Ui::resource_revision`]). Resources that do not
+    /// report [`texture_revision`](Self::texture_revision) keep the default:
+    /// every change repaints the whole target.
+    fn resource_revision(&self) -> u64 {
+        self.raster_revision()
+    }
+    /// The content revision of a live texture, or None when unknown.
+    fn texture_revision(&self, _handle: i32) -> Option<u64> {
+        None
+    }
     fn texture(&self, handle: i32) -> Option<TexView<'_>>;
     fn font_atlas(&self, slot: u8) -> Option<FontView<'_>>;
 }
@@ -41,6 +52,12 @@ impl RenderResources for Ui {
     }
     fn raster_revision(&self) -> u64 {
         Ui::raster_revision(self)
+    }
+    fn resource_revision(&self) -> u64 {
+        Ui::resource_revision(self)
+    }
+    fn texture_revision(&self, handle: i32) -> Option<u64> {
+        Ui::texture_revision(self, handle)
     }
     fn texture(&self, handle: i32) -> Option<TexView<'_>> {
         Ui::texture(self, handle)
