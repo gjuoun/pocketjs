@@ -1,6 +1,8 @@
 import type { JsonSchema } from "./pocket-manifest.ts";
 import {
+  ANIMATION_CLASSES,
   PRESENTATION_MODES,
+  type AnimationClass,
   type PocketCapabilityId,
   type PresentationMode,
   type TargetForm,
@@ -50,6 +52,9 @@ export interface PocketIdfHostProfile {
       readonly presentations: readonly PresentationMode[];
       readonly rasterDensity: number;
     };
+    /** The animation class when the firmware's renderer differs from the
+     *  platform's software rasterizer (contracts/spec/animation.ts). */
+    readonly animation?: AnimationClass;
   };
   readonly capabilities: readonly PocketCapabilityId[];
 }
@@ -116,6 +121,7 @@ export const pocketIdfHostSchema = {
             rasterDensity: { type: "integer", minimum: 1, maximum: 255 },
           },
         },
+        animation: { enum: ANIMATION_CLASSES },
       },
     },
     capabilities: {

@@ -152,6 +152,13 @@
               "maximum": 255
             }
           }
+        },
+        "animation": {
+          "enum": [
+            "composited",
+            "repaint",
+            "still"
+          ]
         }
       }
     },
