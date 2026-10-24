@@ -53,6 +53,10 @@ static const char *TAG = "pocketjs_tab5";
 #define TAB5_MIN_DIRECT_ROWS 32U
 /* Event bit set once the frame's motion has moved its pixels. */
 #define TAB5_MOVED_BIT BIT0
+/* The PPA stops completing 90-degree presents of blocks 4 or 6 raster rows
+ * tall while the panel scans out (measured on ESP32-P4 rev 1.3; 2 and 8 to
+ * 28 rows complete), so no turned strip is shorter than this. */
+#define TAB5_MIN_TURNED_ROWS 8U
 /* The home button drawn below a picture shorter than the screen (or beside
  * one narrower than it): a square of oriented screen pixels, and the SELECT
  * bit it sends. */
@@ -613,12 +617,31 @@ static esp_err_t after_turn(const pocketjs_ui_frame_view_t *frame,
         ++region.height;
       }
     }
-    const uint32_t bottom = region.y + region.height;
-    for (uint32_t y = region.y; y < bottom; y += host->strip_rows) {
+    const uint32_t turned_rows =
+        (TAB5_MIN_TURNED_ROWS + frame->raster_density - 1U) /
+        frame->raster_density;
+    if (host->landscape && region.height < turned_rows) {
+      if (region.y + turned_rows > frame->logical_height)
+        region.y = frame->logical_height - turned_rows;
+      region.height = turned_rows;
+    }
+    /* Landscape strips share the region's rows evenly, so the last one is
+     * not a short remainder; a landscape logical row is a whole number of
+     * cache lines, so any count is aligned. */
+    const uint32_t count =
+        (region.height + host->strip_rows - 1U) / host->strip_rows;
+    uint32_t y = region.y;
+    for (uint32_t strip = 0; strip < count; ++strip) {
       pocketjs_rgb565_rect_t rect = region;
       rect.y = y;
-      rect.height = bottom - y < host->strip_rows ? bottom - y : host->strip_rows;
+      rect.height =
+          host->landscape
+              ? region.height / count + (strip < region.height % count ? 1U : 0U)
+              : (region.y + region.height - y < host->strip_rows
+                     ? region.y + region.height - y
+                     : host->strip_rows);
       host->strips[host->strip_count++] = rect;
+      y += rect.height;
     }
   }
   esp_err_t result = ESP_OK;
@@ -894,6 +917,7 @@ static void start_system(void) {
   };
   ESP_ERROR_CHECK(pocketjs_system_start(&config));
 }
+
 
 static void run_app(void *unused) {
   static tab5_host_t host;
