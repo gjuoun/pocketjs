@@ -8,7 +8,9 @@ list(APPEND EXTRA_COMPONENT_DIRS
     "${pocketjs_components}/pocketjs_ui_qjs"
     "${pocketjs_components}/pocketjs_render_rgb565"
     "${pocketjs_components}/pocketjs_esp32p4_ppa"
-    "${pocketjs_components}/pocketjs_runner")
+    "${pocketjs_components}/pocketjs_runner"
+    "${pocketjs_components}/pocketjs_camera"
+    "${pocketjs_components}/pocketjs_media")
 if(NOT DEFINED POCKETJS_RUST_FROM_SOURCE)
     set(POCKETJS_RUST_FROM_SOURCE ON CACHE BOOL "")
 endif()

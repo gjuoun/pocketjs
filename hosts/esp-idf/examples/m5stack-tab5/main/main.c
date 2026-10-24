@@ -31,6 +31,7 @@
 #include "pocketjs/ui_core.h"
 #include "pocketjs/ui_qjs.h"
 #include "pocketjs_package_app.h"
+#include "tab5_camera_media.h"
 
 static const char *TAG = "pocketjs_tab5";
 
@@ -224,6 +225,7 @@ static esp_err_t sample_input(pocketjs_ui_input_t *input, void *user_data) {
   static pocketjs_ui_touch_t touches[POCKETJS_UI_MAX_TOUCHES];
   tab5_host_t *host = user_data;
   host->frame_started = esp_timer_get_time();
+  tab5_camera_media_present();
   ESP_RETURN_ON_ERROR(esp_lcd_touch_read_data(host->touch), TAG, "touch read");
   esp_lcd_touch_point_data_t points[POCKETJS_UI_MAX_TOUCHES];
   uint8_t count = 0;
@@ -673,8 +675,6 @@ static void start_lane(tab5_lane_t *lane, uint32_t scale, size_t strip_bytes) {
 }
 
 
-
-
 static void run_app(void *unused) {
   static tab5_host_t host;
   const pocketjs_package_host_contract_t *contract =
@@ -700,6 +700,17 @@ static void run_app(void *unused) {
   host.picture_height = picture_height * host.scale;
   host.origin_x = 0U;
   host.origin_y = 0U;
+  /* Strip bytes per logical row of the raster. The strips take internal RAM
+   * before a guest runs, so a camera or other device a guest opens while it
+   * is evaluated gets what remains. */
+  const size_t row_bytes =
+      (size_t)picture_width * contract->raster_density * sizeof(uint16_t);
+  host.strip_rows = TAB5_STRIP_BYTES / row_bytes;
+  assert(8U * ((picture_height / contract->raster_density + host.strip_rows -
+                1U) /
+               host.strip_rows) <= TAB5_MAX_STRIPS);
+  start_lane(&host.lanes[0], contract->raster_density, TAB5_STRIP_BYTES);
+  start_lane(&host.lanes[1], contract->raster_density, TAB5_STRIP_BYTES);
 
   pocketjs_package_t *package = NULL;
   ESP_ERROR_CHECK(pocketjs_package_open(
@@ -734,18 +745,10 @@ static void run_app(void *unused) {
   ESP_ERROR_CHECK(
       pocketjs_ui_qjs_feed_pak(binding, app.pak.data, app.pak.size));
   ESP_ERROR_CHECK(pocketjs_ui_qjs_mount(binding));
+  tab5_camera_media_install(guest, core, &app);
   ESP_ERROR_CHECK(pocketjs_guest_eval(guest, (const char *)app.javascript.data,
                                       app.javascript.size - 1U, "app"));
 
-  /* Strip bytes per logical row of the raster. */
-  const size_t row_bytes =
-      (size_t)picture_width * contract->raster_density * sizeof(uint16_t);
-  host.strip_rows = TAB5_STRIP_BYTES / row_bytes;
-  assert(8U * ((picture_height / contract->raster_density + host.strip_rows -
-                1U) /
-               host.strip_rows) <= TAB5_MAX_STRIPS);
-  start_lane(&host.lanes[0], contract->raster_density, TAB5_STRIP_BYTES);
-  start_lane(&host.lanes[1], contract->raster_density, TAB5_STRIP_BYTES);
   ESP_ERROR_CHECK(pocketjs_rgb565_target_create(&host.target));
   const ppa_client_config_t mover_config = {
       .oper_type = PPA_OPERATION_SRM,

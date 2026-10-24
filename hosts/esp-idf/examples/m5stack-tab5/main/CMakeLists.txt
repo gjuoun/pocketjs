@@ -1,12 +1,14 @@
 idf_component_register(
-    SRCS "main.c"
+    SRCS "main.c" "tab5_camera_media.c"
     REQUIRES
         esp_driver_dma
         esp_driver_ppa
         esp_mm
         esp_lcd
         pocketjs_esp32p4_ppa
+        pocketjs_camera
         pocketjs_guest
+        pocketjs_media
         pocketjs_package
         pocketjs_render_rgb565
         pocketjs_runner
