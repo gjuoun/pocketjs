@@ -59,10 +59,11 @@ pub struct NativeFrameView {
     pub draw_words: *const u32,
     pub draw_word_count: usize,
     pub private_core: *mut c_void,
+    pub resource_revision: u64,
 }
 const _: () = {
     let p32 = core::mem::size_of::<usize>() == 4;
-    assert!(core::mem::size_of::<NativeFrameView>() == if p32 { 48 } else { 64 });
+    assert!(core::mem::size_of::<NativeFrameView>() == if p32 { 56 } else { 72 });
     assert!(core::mem::align_of::<NativeFrameView>() == if p32 { 8 } else { 8 });
     assert!(core::mem::offset_of!(NativeFrameView, struct_size) == if p32 { 0 } else { 0 });
     assert!(core::mem::offset_of!(NativeFrameView, epoch) == if p32 { 8 } else { 8 });
@@ -73,6 +74,7 @@ const _: () = {
     assert!(core::mem::offset_of!(NativeFrameView, draw_words) == if p32 { 36 } else { 40 });
     assert!(core::mem::offset_of!(NativeFrameView, draw_word_count) == if p32 { 40 } else { 48 });
     assert!(core::mem::offset_of!(NativeFrameView, private_core) == if p32 { 44 } else { 56 });
+    assert!(core::mem::offset_of!(NativeFrameView, resource_revision) == if p32 { 48 } else { 64 });
 };
 
 #[repr(C)]

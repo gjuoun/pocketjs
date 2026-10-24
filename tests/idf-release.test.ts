@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { NATIVE_COMPONENTS, NATIVE_POLICY, RUST_TARGETS, nativeSourceFiles, nativeSourceDigest,
@@ -74,7 +74,10 @@ describe("ESP-IDF release integrity", () => {
   });
   test("component versions and internal dependency ranges are checked", () => {
     const names = verifyComponentVersions(root);
-    expect(names).toHaveLength(8);
+    // Every component with a manifest has a release entry.
+    const published = readdirSync(join(root, "hosts/esp-idf/components"))
+      .filter((name) => existsSync(join(root, "hosts/esp-idf/components", name, "idf_component.yml")));
+    expect([...names].sort()).toEqual(published.sort());
     const directory = mkdtempSync(join(tmpdir(), "pocketjs-versions-")); temporary.push(directory);
     const components = join(directory, "hosts/esp-idf/components");
     mkdirSync(components, { recursive: true });

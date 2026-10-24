@@ -51,8 +51,9 @@ typedef struct {
   size_t draw_word_count;
   /* Opaque C bridge; callers must not inspect or dereference. */
   void * _private_core;
+  uint64_t resource_revision;
 } pocketjs_ui_frame_view_t;
-PJS_ABI_ASSERT(sizeof(pocketjs_ui_frame_view_t) == (sizeof(void *) == 4 ? 48 : 64), "pocketjs_ui_frame_view_t size");
+PJS_ABI_ASSERT(sizeof(pocketjs_ui_frame_view_t) == (sizeof(void *) == 4 ? 56 : 72), "pocketjs_ui_frame_view_t size");
 PJS_ABI_ASSERT(PJS_ABI_ALIGNOF(pocketjs_ui_frame_view_t) == (sizeof(void *) == 4 ? 8 : 8), "pocketjs_ui_frame_view_t alignment");
 PJS_ABI_ASSERT(offsetof(pocketjs_ui_frame_view_t, struct_size) == (sizeof(void *) == 4 ? 0 : 0), "pocketjs_ui_frame_view_t.struct_size");
 PJS_ABI_ASSERT(offsetof(pocketjs_ui_frame_view_t, epoch) == (sizeof(void *) == 4 ? 8 : 8), "pocketjs_ui_frame_view_t.epoch");
@@ -63,6 +64,7 @@ PJS_ABI_ASSERT(offsetof(pocketjs_ui_frame_view_t, raster_density) == (sizeof(voi
 PJS_ABI_ASSERT(offsetof(pocketjs_ui_frame_view_t, draw_words) == (sizeof(void *) == 4 ? 36 : 40), "pocketjs_ui_frame_view_t.draw_words");
 PJS_ABI_ASSERT(offsetof(pocketjs_ui_frame_view_t, draw_word_count) == (sizeof(void *) == 4 ? 40 : 48), "pocketjs_ui_frame_view_t.draw_word_count");
 PJS_ABI_ASSERT(offsetof(pocketjs_ui_frame_view_t, _private_core) == (sizeof(void *) == 4 ? 44 : 56), "pocketjs_ui_frame_view_t._private_core");
+PJS_ABI_ASSERT(offsetof(pocketjs_ui_frame_view_t, resource_revision) == (sizeof(void *) == 4 ? 48 : 64), "pocketjs_ui_frame_view_t.resource_revision");
 
 typedef struct {
   size_t struct_size;

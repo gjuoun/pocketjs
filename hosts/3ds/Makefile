@@ -105,17 +105,18 @@ CFLAGS += -DPOCKETJS_CAPTURE \
 endif
 
 LDFLAGS := -specs=3dsx.specs $(ARCH) -Wl,--gc-sections -Wl,-Map,$(BUILD)/pocketjs-3ds.map
-# libjpeg (devkitPro's 3ds-libjpeg-turbo portlib) for photos_image.c.
+# libjpeg (devkitPro's 3ds-libjpeg-turbo portlib) for photos_jpeg.c.
 LIBPATHS := -L$(DEVKITPRO)/portlibs/3ds/lib -L$(DEVKITPRO)/libctru/lib
 LIBS := -ljpeg -lcitro3d -lctru -lm
 
-# quirc (vendored, ISC; src/quirc/VENDORED.txt) decodes QR codes for camera.c.
+# quirc (vendored, ISC; engine/host-services/quirc/VENDORED.txt) decodes QR
+# codes for camera.c.
 QUIRC_OBJECTS := $(BUILD)/quirc/quirc.o $(BUILD)/quirc/decode.o $(BUILD)/quirc/identify.o $(BUILD)/quirc/version_db.o
 OBJECTS := $(BUILD)/main.o $(BUILD)/media.o $(BUILD)/offload.o $(BUILD)/soc.o $(BUILD)/svcwire.o $(BUILD)/runtime.o $(BUILD)/dev_protocol.o $(BUILD)/devserver.o $(BUILD)/devmenu.o $(BUILD)/native.o $(BUILD)/hbldr.o $(BUILD)/gfx.o $(BUILD)/qjs.o $(BUILD)/input.o \
   $(BUILD)/sha256.o $(BUILD)/jscan.o $(BUILD)/link_proto.o $(BUILD)/link.o $(BUILD)/launcher.o $(BUILD)/services_host.o \
   $(BUILD)/wifi.o $(BUILD)/camera.o \
   $(BUILD)/stage.o $(BUILD)/agent.o $(QUIRC_OBJECTS) $(BUILD)/vshader_shbin.o $(BUILD)/stage_shbin.o \
-  $(BUILD)/photos.o $(BUILD)/photos_image.o $(BUILD)/fs.o $(BUILD)/transition.o $(BUILD)/bytecode.o
+  $(BUILD)/photos.o $(BUILD)/photos_image.o $(BUILD)/photos_jpeg.o $(BUILD)/fs.o $(BUILD)/transition.o $(BUILD)/bytecode.o
 ELF := $(BUILD)/pocketjs-3ds.elf
 SMDH := $(BUILD)/pocketjs-3ds.smdh
 
@@ -173,7 +174,7 @@ $(BUILD)/%.o: $(SHARED)/%.c $(wildcard $(SHARED)/*.h) $(FLAGS_STAMP) | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Third-party code keeps its own warnings out of the host's build log.
-$(BUILD)/quirc/%.o: $(SOURCE)/quirc/%.c $(wildcard $(SOURCE)/quirc/*.h) $(FLAGS_STAMP) | $(BUILD)
+$(BUILD)/quirc/%.o: $(SHARED)/quirc/%.c $(wildcard $(SHARED)/quirc/*.h) $(FLAGS_STAMP) | $(BUILD)
 	mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -w -c $< -o $@
 
@@ -182,13 +183,14 @@ $(BUILD)/services_host.o $(BUILD)/qjs.o $(BUILD)/main.o $(BUILD)/devmenu.o: \
   $(wildcard $(SHARED)/*.h) $(SOURCE)/services_host.h $(SOURCE)/runtime.h
 $(BUILD)/camera.o $(BUILD)/gfx.o $(BUILD)/qjs.o $(BUILD)/main.o: $(SOURCE)/camera.h
 $(BUILD)/photos.o $(BUILD)/camera.o $(BUILD)/qjs.o: $(SOURCE)/photos.h
-$(BUILD)/photos.o $(BUILD)/photos_image.o: $(SOURCE)/photos_image.h
-$(BUILD)/photos.o $(BUILD)/wifi.o $(BUILD)/agent.o $(BUILD)/stage.o $(BUILD)/runtime.o: $(wildcard $(SHARED)/*.h)
+$(BUILD)/photos.o $(BUILD)/photos_image.o $(BUILD)/photos_jpeg.o: $(SHARED)/photos_image.h
+$(BUILD)/photos.o $(BUILD)/photos_jpeg.o: $(SOURCE)/photos_jpeg.h
+$(BUILD)/photos.o $(BUILD)/wifi.o $(BUILD)/agent.o $(BUILD)/stage.o $(BUILD)/runtime.o $(BUILD)/qjs.o $(BUILD)/main.o: $(wildcard $(SHARED)/*.h)
 $(BUILD)/wifi.o $(BUILD)/qjs.o $(BUILD)/main.o: $(SOURCE)/wifi.h
 $(BUILD)/stage.o $(BUILD)/agent.o $(BUILD)/qjs.o $(BUILD)/main.o $(BUILD)/services_host.o: $(SOURCE)/stage.h $(SOURCE)/agent.h
 $(BUILD)/runtime.o: $(SOURCE)/runtime.h
 $(BUILD)/qjs.o: $(SOURCE)/offload.h $(SOURCE)/offload_coverage.h
-$(BUILD)/media.o: $(SOURCE)/media.h $(SOURCE)/media_wire.h $(SOURCE)/media_adpcm.h
+$(BUILD)/media.o: $(SOURCE)/media.h $(SHARED)/media_wire.h $(SHARED)/media_adpcm.h
 $(BUILD)/main.o $(BUILD)/qjs.o $(BUILD)/gfx.o: $(SOURCE)/media.h
 $(BUILD)/main.o $(BUILD)/transition.o: $(SOURCE)/transition.h
 $(BUILD)/main.o $(BUILD)/bytecode.o: $(SOURCE)/bytecode.h

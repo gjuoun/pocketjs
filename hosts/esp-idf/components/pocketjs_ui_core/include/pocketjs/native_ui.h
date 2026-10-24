@@ -38,6 +38,7 @@ int32_t pocketjs_native_ui_texture(pocketjs_ui_core_t * core, int32_t handle, po
 void pocketjs_native_ui_tick(pocketjs_ui_core_t * core);
 size_t pocketjs_native_ui_touch_hits(pocketjs_ui_core_t * core, const uint32_t * touches, size_t touch_count, int32_t * output, size_t output_capacity);
 size_t pocketjs_native_ui_touch_hits_auxiliary(pocketjs_ui_core_t * core, const uint32_t * touches, size_t touch_count, int32_t * output, size_t output_capacity);
+int32_t pocketjs_native_ui_update_texture_rect(pocketjs_ui_core_t * core, int32_t handle, uint32_t x, uint32_t y, uint32_t width, uint32_t height, const uint8_t * data, size_t size);
 int32_t pocketjs_native_ui_upload_img_entry(pocketjs_ui_core_t * core, const uint8_t * data, size_t size);
 int32_t pocketjs_native_ui_upload_texture(pocketjs_ui_core_t * core, const uint8_t * data, size_t size, uint32_t width, uint32_t height, uint32_t psm);
 size_t pocketjs_native_ui_wrap_text(pocketjs_ui_core_t * core, const uint8_t * data, size_t size, uint32_t slot, float max_width, uint32_t * output, size_t capacity);

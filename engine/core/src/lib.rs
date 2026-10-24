@@ -297,6 +297,9 @@ pub struct Ui {
     stable_motion_paint: bool,
     /// Changes whenever raster-visible resource bytes or tables change.
     raster_revision: u64,
+    /// Changes with `raster_revision` except when a live texture's pixels
+    /// are overwritten in place (each texture's own revision records those).
+    resource_revision: u64,
     focused: i32,
     draw_list: DrawList,
     /// Virtual cursor sprite (spec ops 28/29, input.cursor capability):
@@ -382,6 +385,7 @@ impl Ui {
             raster_density,
             stable_motion_paint: false,
             raster_revision: 1,
+            resource_revision: 1,
             focused: 0,
             draw_list: DrawList::new(),
             cursor_tex: -1,
@@ -441,7 +445,21 @@ impl Ui {
         self.raster_revision
     }
 
+    /// [`raster_revision`](Self::raster_revision) less the in-place pixel
+    /// writes of live textures: a damage tracker that compares each sampled
+    /// texture's [`texture_revision`](Self::texture_revision) repaints only
+    /// the ops drawing an updated one while this stays.
+    pub fn resource_revision(&self) -> u64 {
+        self.resource_revision
+    }
+
     fn bump_raster_revision(&mut self) {
+        self.raster_revision = self.raster_revision.wrapping_add(1);
+        self.resource_revision = self.resource_revision.wrapping_add(1);
+    }
+
+    /// A live texture's pixels were overwritten in place.
+    fn bump_texture_content(&mut self) {
         self.raster_revision = self.raster_revision.wrapping_add(1);
     }
 
@@ -1148,7 +1166,57 @@ impl Ui {
             );
         }
         tex.revision = tex.revision.wrapping_add(1);
-        self.bump_raster_revision();
+        self.bump_texture_content();
+        true
+    }
+
+    /// Overwrite the rectangle `x, y, w, h` of a live non-T8 texture IN PLACE
+    /// with `pixels`, `w * h` texels in the texture's own format, rows packed
+    /// (a host's camera or video plane: the handle and its image bindings
+    /// stay while the bytes change). Returns false, changing nothing, on
+    /// stale handles, T8 textures, a rectangle outside the texture or a size
+    /// mismatch.
+    pub fn update_texture_rect(
+        &mut self,
+        handle: i32,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        pixels: &[u8],
+    ) -> bool {
+        let Some(slot) = tex_resolve(&self.textures, handle) else {
+            return false;
+        };
+        let Some(tex) = self.textures[slot as usize].tex.as_mut() else {
+            return false;
+        };
+        let bpp = match tex.psm {
+            spec::psm::PSM_5650 | spec::psm::PSM_4444 => 2usize,
+            spec::psm::PSM_8888 => 4usize,
+            _ => return false,
+        };
+        if w == 0 || h == 0 || x.checked_add(w).map_or(true, |right| right > tex.w)
+            || y.checked_add(h).map_or(true, |bottom| bottom > tex.h)
+            || pixels.len() != w as usize * h as usize * bpp
+        {
+            return false;
+        }
+        let row_bytes = w as usize * bpp;
+        let stride = tex.w as usize * bpp;
+        let base = tex.data.as_mut_ptr() as *mut u8;
+        for row in 0..h as usize {
+            let offset = (y as usize + row) * stride + x as usize * bpp;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    pixels.as_ptr().add(row * row_bytes),
+                    base.add(offset),
+                    row_bytes,
+                );
+            }
+        }
+        tex.revision = tex.revision.wrapping_add(1);
+        self.bump_texture_content();
         true
     }
 

@@ -35,6 +35,7 @@
 #include "pocketjs/ui_core.h"
 #include "pocketjs/ui_qjs.h"
 #include "pocketjs_package_app.h"
+#include "tab5_camera_media.h"
 
 static const char *TAG = "pocketjs_tab5";
 
@@ -248,6 +249,7 @@ static esp_err_t sample_input(pocketjs_ui_input_t *input, void *user_data) {
   static pocketjs_ui_touch_t touches[POCKETJS_UI_MAX_TOUCHES];
   tab5_host_t *host = user_data;
   host->frame_started = esp_timer_get_time();
+  tab5_camera_media_present();
   ESP_RETURN_ON_ERROR(esp_lcd_touch_read_data(host->touch), TAG, "touch read");
   esp_lcd_touch_point_data_t points[POCKETJS_UI_MAX_TOUCHES];
   uint8_t count = 0;
@@ -734,6 +736,9 @@ typedef struct {
 static void stop_guest(tab5_guest_t *running) {
   if (running->runner != NULL)
     ESP_ERROR_CHECK(pocketjs_runner_stop(running->runner));
+  /* Camera and media textures belong to the core. */
+  if (running->core != NULL)
+    tab5_camera_media_teardown();
   /* The guest goes before its mounted binding. */
   if (running->guest != NULL)
     pocketjs_guest_destroy(running->guest);
@@ -781,6 +786,8 @@ static esp_err_t boot_guest(tab5_host_t *host,
     result = pocketjs_ui_qjs_mount(running.binding);
   if (result == ESP_OK && system_app != NULL)
     result = pocketjs_system_bind(running.guest, system_app);
+  if (result == ESP_OK)
+    tab5_camera_media_install(running.guest, running.core, app);
   if (result == ESP_OK)
     result = pocketjs_guest_eval(running.guest,
                                  (const char *)app->javascript.data,
@@ -939,7 +946,6 @@ static void run_app(void *unused) {
   host.picture_height = picture_height * host.scale;
   host.origin_x = 0U;
   host.origin_y = 0U;
-
   /* Strip bytes per logical row of the raster. */
   const size_t row_bytes =
       (size_t)picture_width * contract->raster_density * sizeof(uint16_t);

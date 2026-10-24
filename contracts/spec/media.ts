@@ -11,8 +11,9 @@ export const MEDIA_PACKET = Object.freeze({ video: 1, audio: 2, end: 3, error: 4
 /** The header's video codec. `h264` needs the console's hardware decoder
  * (`MediaStatus.h264`). `pal8` is a palettized picture any console expands
  * in software; each packet carries the pixels that changed since the last
- * one (hosts/3ds/src/media_wire.h has the layout, tools/media-stream.ts the
- * encoder). The picture sits at the texture's top-left corner. */
+ * one (engine/host-services/media_wire.h has the layout,
+ * tools/media-stream.ts the encoder). The picture sits at the texture's
+ * top-left corner. */
 export const MEDIA_CODEC = Object.freeze({ h264: 1, pal8: 2 });
 export type MediaCodec = keyof typeof MEDIA_CODEC;
 export interface MediaSource {

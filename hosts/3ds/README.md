@@ -47,8 +47,12 @@ src/jscan.c           bounded JSON reader/writer for the host's own records
 src/wifi.c            globalThis.wifi over AC and nwm::EXT
 src/camera.c          globalThis.camera: camera texture, QR decode, stills
 src/photos.c          camera.photo: JPEG save, list, decode, thumbnails
-src/photos_image.c    DCF names, JPEG through libjpeg, thumbnail and full view
-src/quirc/            vendored quirc (ISC), the QR decoder camera.c runs
+src/photos_jpeg.c     JPEG through libjpeg for photos.c
+../../engine/host-services/
+                      portable C shared with the ESP-IDF host: photos_image.c
+                      (DCF names, thumbnail and full view), quirc/ (vendored,
+                      ISC, the QR decoder camera.c runs), media_wire.h and
+                      media_adpcm.h (the companion media stream)
 src/input.c           3DS keys and circle pad -> the PSP BTN bitmask
 src/vshader.v.pica    the PICA200 vertex shader
 Makefile              run INSIDE the container by tools/3ds.ts
@@ -550,8 +554,9 @@ for the photo fitted to 320x240), and `photos_present` uploads the pixels as a c
 and publishes a "loaded" event. Measured on an Old 3DS: the preview at 30 fps
 with the guest at 16.9 ms a frame; a photo saved 3.3 s after the press
 (0.7 s for the still, 2.6 s to encode and write it behind the 60 fps UI); a
-full 640x480 decode in 0.64 s. The pure parts (`src/photos_image.c`: names,
-pixel conversion, box filters) run natively in `tests/camera-photo.test.ts`.
+full 640x480 decode in 0.64 s. The pure parts (`engine/host-services/photos_image.c`:
+names, pixel conversion, box filters) and the libjpeg codec
+(`src/photos_jpeg.c`) run natively in `tests/camera-photo.test.ts`.
 
 Capture and offload builds compile link, net, wifi and camera to inert stubs
 and leave the app switching ops out, so goldens stay deterministic.

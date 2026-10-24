@@ -170,8 +170,8 @@ beforeAll(() => {
     "cc", "-std=gnu11", "-O1", "-Wall", "-Wextra", "-fsanitize=address,undefined",
     `-I${shared}`, `-I${src}`, join(scratch, "harness.c"),
     join(shared, "sha256.c"), join(shared, "link_proto.c"), join(shared, "jscan.c"),
-    join(src, "quirc/quirc.c"), join(src, "quirc/decode.c"), join(src, "quirc/identify.c"),
-    join(src, "quirc/version_db.c"), "-lm", "-o", binary,
+    join(shared, "quirc/quirc.c"), join(shared, "quirc/decode.c"), join(shared, "quirc/identify.c"),
+    join(shared, "quirc/version_db.c"), "-lm", "-o", binary,
   ]);
   expect(compile.exitCode, compile.stderr.toString()).toBe(0);
 });

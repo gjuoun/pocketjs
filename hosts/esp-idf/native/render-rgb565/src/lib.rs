@@ -192,6 +192,17 @@ impl RenderResources for FrameResources<'_> {
     fn raster_revision(&self) -> u64 {
         self.0.raster_revision
     }
+    fn resource_revision(&self) -> u64 {
+        self.0.resource_revision
+    }
+    fn texture_revision(&self, handle: i32) -> Option<u64> {
+        unsafe {
+            let mut view: NativeTextureView = core::mem::zeroed();
+            view.struct_size = core::mem::size_of::<NativeTextureView>();
+            (pocketjs_native_ui_texture(self.0.private_core, handle, &mut view) == 0)
+                .then_some(view.revision)
+        }
+    }
     fn texture(&self, handle: i32) -> Option<TexView<'_>> {
         unsafe {
             let mut view: NativeTextureView = core::mem::zeroed();

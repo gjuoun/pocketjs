@@ -199,3 +199,44 @@ fn rendering_the_same_frame_twice_with_motion_is_a_no_op() {
     gradient(&mut ui, row, abgr(1, 2, 3, 255), abgr(200, 100, 50, 255));
     play(&mut ui, 3, |_, _| {});
 }
+
+#[test]
+fn a_texture_overwritten_in_place_repaints_only_its_quad_exactly() {
+    let mut ui = screen();
+    let row = boxed(&mut ui, spec::ROOT_ID, 0.0, 40.0, W as f64, 20.0);
+    gradient(&mut ui, row, abgr(20, 120, 220, 255), abgr(10, 90, 180, 255));
+    // A camera-like plane: one texture whose pixels change every frame,
+    // under a translucent badge, beside a row that moves.
+    let plane = ui.upload_texture(&vec![0u8; 32 * 16 * 2], 32, 16, spec::psm::PSM_5650);
+    let image = ui.create_node(spec::NodeType::Image as u8);
+    ui.set_prop(image, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+    ui.set_prop(image, spec::prop::INSET_L, 10.0);
+    ui.set_prop(image, spec::prop::INSET_T, 6.0);
+    ui.set_prop(image, spec::prop::WIDTH, 48.0);
+    ui.set_prop(image, spec::prop::HEIGHT, 24.0);
+    ui.insert_before(spec::ROOT_ID, image, 0);
+    ui.set_image(image, plane);
+    let badge = boxed(&mut ui, spec::ROOT_ID, 40.0, 20.0, 30.0, 12.0);
+    ui.set_prop(badge, spec::prop::BG_COLOR, abgr(255, 255, 255, 140));
+    ui.set_prop(badge, spec::prop::Z_INDEX, 10.0);
+    play(&mut ui, 6, |ui, frame| {
+        let pixels: Vec<u8> = (0..20 * 10)
+            .flat_map(|i| [(i * 7 + frame * 31) as u8, (frame * 13) as u8])
+            .collect();
+        assert!(ui.update_texture_rect(plane, 3, 2, 20, 10, &pixels));
+        ui.set_prop(row, spec::prop::TRANSLATE_Y, frame as f64 * 1.5);
+    });
+    // Updates alone: after the first frame no plan repaints the screen.
+    let mut tracker = pocketjs_core::damage::DamageTracker::<8>::new();
+    let target = pocketjs_core::damage::DamageTarget::new(W * SCALE, H * SCALE, SCALE, 1);
+    let mut partial = 0;
+    for frame in 0..4u8 {
+        assert!(ui.update_texture_rect(plane, 0, 0, 20, 10, &[frame; 20 * 10 * 2]));
+        ui.tick();
+        let words = ui.draw().words.clone();
+        let plan = tracker.prepare(&ui, &words, target).unwrap();
+        partial += (frame > 0 && !plan.is_full_redraw() && !plan.is_empty()) as usize;
+        tracker.commit(&ui, &words, target);
+    }
+    assert_eq!(partial, 3);
+}

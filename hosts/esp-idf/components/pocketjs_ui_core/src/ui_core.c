@@ -178,6 +178,17 @@ int32_t pocketjs_ui_core_upload_texture(pocketjs_ui_core_t *core,
                                            psm);
 }
 
+esp_err_t pocketjs_ui_core_update_texture_rect(pocketjs_ui_core_t *core,
+                                              int32_t texture, uint32_t x,
+                                              uint32_t y, uint32_t width,
+                                              uint32_t height,
+                                              const void *data, size_t size) {
+  return pocketjs_native_ui_update_texture_rect(core, texture, x, y, width,
+                                                height, data, size) == 0
+             ? ESP_OK
+             : ESP_ERR_INVALID_ARG;
+}
+
 int32_t pocketjs_ui_core_upload_img_entry(pocketjs_ui_core_t *core,
                                           const void *data, size_t size) {
   return pocketjs_native_ui_upload_img_entry(core, data, size);

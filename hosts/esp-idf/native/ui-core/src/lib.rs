@@ -381,6 +381,30 @@ pub unsafe extern "C" fn pocketjs_native_ui_upload_texture(
     handle
 }
 
+/// Overwrite a rectangle of a live texture in place (`Ui::update_texture_rect`):
+/// 0, or -1 when the core refuses it.
+#[no_mangle]
+pub unsafe extern "C" fn pocketjs_native_ui_update_texture_rect(
+    core: *mut NativeUiCore,
+    handle: i32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    data: *const u8,
+    size: usize,
+) -> i32 {
+    let Some(core) = core_mut(core) else {
+        return -1;
+    };
+    let Some(data) = bytes(data, size) else {
+        return -1;
+    };
+    let updated = core.ui.update_texture_rect(handle, x, y, width, height, data);
+    mutated(core);
+    if updated { 0 } else { -1 }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pocketjs_native_ui_upload_img_entry(
     core: *mut NativeUiCore,
@@ -491,6 +515,7 @@ unsafe fn draw_surface(core: *mut NativeUiCore, out: *mut NativeFrameView, auxil
     let draw_words = words.as_ptr();
     let draw_word_count = words.len();
     let raster_revision = core.ui.raster_revision();
+    let resource_revision = core.ui.resource_revision();
     core.frame_words = draw_words;
     core.frame_word_count = draw_word_count;
     *out = NativeFrameView {
@@ -503,6 +528,7 @@ unsafe fn draw_surface(core: *mut NativeUiCore, out: *mut NativeFrameView, auxil
         draw_words,
         draw_word_count,
         private_core: core as *mut NativeUiCore as *mut c_void,
+        resource_revision,
     };
     0
 }
