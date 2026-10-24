@@ -957,6 +957,10 @@ static void run_app(void *unused) {
   assert(8U * ((picture_height / contract->raster_density + host.strip_rows -
                 1U) /
                host.strip_rows) <= TAB5_MAX_STRIPS);
+  /* A region's rows shared evenly across its strips give each at least half
+   * of strip_rows. */
+  assert(!host.landscape || host.strip_rows / 2U * contract->raster_density >=
+                                TAB5_MIN_TURNED_ROWS);
   async_memcpy_config_t copy_config = ASYNC_MEMCPY_DEFAULT_CONFIG();
   copy_config.backlog = 4;
   copy_config.dma_burst_size = 64;
