@@ -80,6 +80,7 @@ const APPLET_CAPABILITIES = [
   "text.glyphs.runtime",
   "input.buttons",
   "input.analog.left",
+  "input.text",
   "display.auxiliary",
   "input.touch.auxiliary",
   "net.http",
