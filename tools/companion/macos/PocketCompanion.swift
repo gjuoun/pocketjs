@@ -832,7 +832,7 @@ struct AppletsPage: View {
                 HStack(spacing: 6) {
                   Text("Set up on this Mac:").font(.callout).foregroundStyle(.secondary)
                   ForEach(needs, id: \.0) { need in
-                    Button(need.0) { Navigation.shared.page = need.1 }.buttonStyle(.link)
+                    Button(need.0) { Navigation.shared.page = need.1 }.buttonStyle(.bordered).controlSize(.small)
                   }
                 }
               }
@@ -1099,15 +1099,95 @@ struct SettingsPage: View {
 
 // MARK: - Snapshot
 
-/// `--snapshot <png> [--page <page>]` renders a page to a PNG five seconds
-/// after launch: a check that needs no screen-recording permission.
+/// `--snapshot <png> [--page <page>] [--window]` renders a page to a PNG five
+/// seconds after launch: a check that needs no screen-recording permission.
+/// `--window` draws it inside the window's frame: title bar and sidebar.
 enum Snapshot {
   @MainActor
   static func write(page: Page, to url: URL) {
-    let renderer = ImageRenderer(content: PageView(page: page).padding(28).frame(width: 620, alignment: .leading).background(Color(nsColor: .windowBackgroundColor)))
+    let content = PageView(page: page).padding(28).frame(width: 620, alignment: .leading)
+    let view: AnyView = CommandLine.arguments.contains("--window")
+      ? AnyView(WindowPicture(page: page, content: content))
+      : AnyView(content.background(Color(nsColor: .windowBackgroundColor)))
+    let renderer = ImageRenderer(content: view)
     renderer.scale = 2
     guard let cg = renderer.cgImage else { return }
     try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?.write(to: url)
+  }
+}
+
+/// The window drawn for a snapshot: a title bar, the sidebar with `page`
+/// selected, and the page. Offscreen rendering cannot draw a live window.
+struct WindowPicture<Content: View>: View {
+  let page: Page
+  let content: Content
+
+  private static var lights: [Color] {
+    [Color(red: 1, green: 0.37, blue: 0.34), Color(red: 1, green: 0.74, blue: 0.18), Color(red: 0.16, green: 0.79, blue: 0.25)]
+  }
+
+  var body: some View {
+    VStack(spacing: 0) {
+      titleBar
+      HStack(alignment: .top, spacing: 0) {
+        sidebar
+        content
+          .frame(maxWidth: .infinity, alignment: .topLeading)
+          .background(Color(nsColor: .windowBackgroundColor))
+      }
+    }
+    .frame(width: 860)
+    .background(Color(nsColor: .windowBackgroundColor))
+    .clipShape(RoundedRectangle(cornerRadius: 12))
+  }
+
+  private var titleBar: some View {
+    HStack(spacing: 8) {
+      ForEach(0..<3, id: \.self) { index in
+        Circle().fill(Self.lights[index]).frame(width: 12, height: 12)
+      }
+      Spacer()
+      Text("Pocket Companion").font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+      Spacer()
+      Color.clear.frame(width: 52, height: 12)
+    }
+    .padding(.horizontal, 14)
+    .frame(height: 38)
+  }
+
+  private var sidebar: some View {
+    VStack(alignment: .leading, spacing: 2) {
+      item(.start)
+      item(.consoles)
+      item(.applets)
+      Text("Services")
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(.secondary)
+        .padding(.leading, 10)
+        .padding(.top, 14)
+      item(.x)
+      item(.discord)
+      item(.youtube)
+      item(.assistant)
+      Spacer().frame(height: 14)
+      item(.settings)
+      Spacer()
+    }
+    .padding(10)
+    .frame(width: 200)
+    .frame(maxHeight: .infinity, alignment: .top)
+    .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
+    .background(Color.secondary.opacity(0.08))
+  }
+
+  private func item(_ entry: Page) -> some View {
+    let selected: Bool = entry == page
+    return Label(entry.title, systemImage: entry.symbol)
+      .font(.system(size: 13))
+      .padding(.horizontal, 10)
+      .padding(.vertical, 5)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Color.accentColor.opacity(0.22) : Color.clear))
   }
 }
 
