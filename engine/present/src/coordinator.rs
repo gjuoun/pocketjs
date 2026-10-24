@@ -115,6 +115,7 @@ trait ErasedDisplay {
     fn acquire(&mut self, region: Rect) -> Result<Target<'_>, DisplayError>;
     fn flush(&mut self, regions: &[Rect]) -> Result<ErasedValue, DisplayError>;
     fn wait(&mut self, token: ErasedValue) -> Result<(), DisplayError>;
+    fn move_pixels(&mut self, destination: Rect, dx: i32, dy: i32) -> Result<(), DisplayError>;
 }
 
 struct DisplayAdapter<D>(D);
@@ -140,6 +141,9 @@ where
     fn wait(&mut self, token: ErasedValue) -> Result<(), DisplayError> {
         self.0
             .wait(*token.downcast().expect("matching display token"))
+    }
+    fn move_pixels(&mut self, destination: Rect, dx: i32, dy: i32) -> Result<(), DisplayError> {
+        self.0.move_pixels(destination, dx, dy)
     }
 }
 
@@ -706,11 +710,33 @@ impl Coordinator {
                     self.scale,
                     descriptor.format as u64,
                 );
-                let plan = display.histories[slot]
-                    .1
-                    .prepare(views.last().unwrap(), &list.words, target)
-                    .and_then(|plan| plan.with_policy(DamagePolicy::default()))
-                    .map_err(|_| PresentError::InvalidFrame)?;
+                let tracker = &mut display.histories[slot].1;
+                let view = views.last().unwrap();
+                // A display that moves retained pixels reuses content that
+                // only moved: it moves those pixels before the first strip.
+                let plan = if descriptor.retained_move {
+                    tracker.prepare_with_motion(view, &list.words, target)
+                } else {
+                    tracker.prepare(view, &list.words, target)
+                }
+                .and_then(|plan| plan.with_policy(DamagePolicy::default()))
+                .map_err(|_| PresentError::InvalidFrame)?;
+                if let Some(motion) = plan.motion() {
+                    let scale = self.scale;
+                    let moved = motion.destination;
+                    let destination = Rect::new(
+                        moved.x0 as u32 * scale,
+                        moved.y0 as u32 * scale,
+                        (moved.x1 - moved.x0) as u32 * scale,
+                        (moved.y1 - moved.y0) as u32 * scale,
+                    );
+                    display
+                        .driver
+                        .as_mut()
+                        .expect("validated display")
+                        .move_pixels(destination, motion.dx * scale as i32, motion.dy * scale as i32)
+                        .map_err(|error| PresentError::Acquire(DisplayId(index), error))?;
+                }
                 physical_damage(plan.regions(), &descriptor, self.scale)?
             } else {
                 alloc::vec![Rect::new(0, 0, descriptor.width, descriptor.height)]
@@ -1167,6 +1193,7 @@ fn validate_display(display: &DisplayDescriptor, scale: u32) -> Result<(), Prese
                 || !display.device_frame_storage
                 || display.target_ownership != TargetOwnership::CpuVisible)
         || display.queued_flush && display.target_ownership != TargetOwnership::DeviceOwned
+        || display.retained_move && (!display.device_frame_storage || !display.partial_refresh)
     {
         return Err(PresentError::InvalidDisplayDescriptor);
     }

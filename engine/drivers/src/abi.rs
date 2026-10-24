@@ -115,6 +115,7 @@ pub const POCKET_DISPLAY_DEVICE_ROTATION: u32 = 8;
 pub const POCKET_DISPLAY_DEVICE_SCALING: u32 = 16;
 pub const POCKET_DISPLAY_PIPELINED_ACQUIRE: u32 = 64;
 pub const POCKET_DISPLAY_QUEUED_FLUSH: u32 = 128;
+pub const POCKET_DISPLAY_RETAINED_MOVE: u32 = 256;
 pub const POCKET_STATUS_OK: i32 = 0;
 pub const POCKET_STATUS_UNSUPPORTED: i32 = -1;
 pub const POCKET_STATUS_INVALID: i32 = -2;
@@ -153,6 +154,9 @@ pub type PocketDisplayFlushFn = unsafe extern "C" fn(context: *mut c_void, regio
 pub type PocketDisplayWaitFn = unsafe extern "C" fn(context: *mut c_void, token: u64) -> i32;
 
 pub type PocketDisplayVsyncFn = unsafe extern "C" fn(context: *mut c_void) -> u32;
+
+/// RETAINED_MOVE displays only. Called after frame_identity and before the frame's first acquire: every retained pixel of destination takes the value of the pixel at (-dx, -dy) from it. The display completes the move before any later flush writes. An error leaves destination undefined; the runtime repaints the whole target next frame.
+pub type PocketDisplayMoveFn = unsafe extern "C" fn(context: *mut c_void, destination: *const PocketRect, dx: i32, dy: i32) -> i32;
 
 pub type PocketRendererDescriptorFn = unsafe extern "C" fn(context: *mut c_void, out: *mut PocketRendererDescriptor) -> i32;
 
@@ -551,6 +555,7 @@ abi_record! {
         pub wait: Option<PocketDisplayWaitFn>,
         pub vsync: Option<PocketDisplayVsyncFn>,
         pub frame_identity: Option<PocketDisplayFrameIdentityFn>,
+        pub move_pixels: Option<PocketDisplayMoveFn>,
     }
 }
 
