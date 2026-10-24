@@ -23,6 +23,7 @@ import { encodeQr, rasterizeQr } from "../tools/companion/qr.ts";
 
 const root = resolve(import.meta.dir, "..");
 const src = join(root, "hosts/3ds/src");
+const shared = join(root, "engine/host-services");
 
 // argv-driven probe: one command per run, one result line on stdout.
 const HARNESS = String.raw`
@@ -167,10 +168,10 @@ beforeAll(() => {
   writeFileSync(join(scratch, "harness.c"), HARNESS);
   const compile = Bun.spawnSync([
     "cc", "-std=gnu11", "-O1", "-Wall", "-Wextra", "-fsanitize=address,undefined",
-    `-I${src}`, join(scratch, "harness.c"),
+    `-I${src}`, `-I${shared}`, join(scratch, "harness.c"),
     join(src, "sha256.c"), join(src, "link_proto.c"), join(src, "jscan.c"),
-    join(src, "quirc/quirc.c"), join(src, "quirc/decode.c"), join(src, "quirc/identify.c"),
-    join(src, "quirc/version_db.c"), "-lm", "-o", binary,
+    join(shared, "quirc/quirc.c"), join(shared, "quirc/decode.c"), join(shared, "quirc/identify.c"),
+    join(shared, "quirc/version_db.c"), "-lm", "-o", binary,
   ]);
   expect(compile.exitCode, compile.stderr.toString()).toBe(0);
 });
