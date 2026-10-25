@@ -2,13 +2,11 @@ import { expect, test } from "bun:test";
 import { createWasmUi } from "../hosts/web/wasm-ops.js";
 import { PROP, abgr } from "../contracts/spec/spec.ts";
 
-// Root-space border box of a node: untransformed, unclipped, margin excluded.
-type NodeRect = { x: number; y: number; w: number; h: number };
 const wasmBytes = () => Bun.file(new URL("../hosts/web/pocketjs.wasm", import.meta.url)).arrayBuffer();
 
 test("nodeRect returns the root-space border box of a nested node", async () => {
   const wasm = await createWasmUi(await wasmBytes(), { width: 480, height: 272 });
-  const ops = wasm.ops as unknown as { nodeRect?: (id: number) => NodeRect | null };
+  const ops = wasm.ops;
   const parent = ops.createNode(0);
   ops.setProp(parent, PROP.marginL, 20); ops.setProp(parent, PROP.marginT, 10);
   ops.setProp(parent, PROP.width, 100); ops.setProp(parent, PROP.height, 80);
@@ -27,7 +25,7 @@ test("nodeRect returns the root-space border box of a nested node", async () => 
 
 test("nodeRect is null for the none id and for a destroyed node", async () => {
   const wasm = await createWasmUi(await wasmBytes(), { width: 480, height: 272 });
-  const ops = wasm.ops as unknown as { nodeRect?: (id: number) => NodeRect | null };
+  const ops = wasm.ops;
   const node = ops.createNode(0);
   ops.insertBefore(1, node, 0);
   wasm.tick();
