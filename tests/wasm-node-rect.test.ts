@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { createWasmUi } from "../hosts/web/wasm-ops.js";
+import { createWasmUi } from "../platforms/web/wasm-ops.js";
 import { PROP, abgr } from "../contracts/spec/spec.ts";
 
-const wasmBytes = () => Bun.file(new URL("../hosts/web/pocketjs.wasm", import.meta.url)).arrayBuffer();
+const wasmBytes = () => Bun.file(new URL("../platforms/web/pocketjs.wasm", import.meta.url)).arrayBuffer();
 
 test("nodeRect returns the root-space border box of a nested node", async () => {
   const wasm = await createWasmUi(await wasmBytes(), { width: 480, height: 272 });
